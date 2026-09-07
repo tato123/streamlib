@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.19.0](https://github.com/tatolab/streamlib/compare/v0.18.60...v0.19.0) (2026-09-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **control-plane:** restore live graph mutation over MCP and make a late add + connect carry frames ([#2205](https://github.com/tatolab/streamlib/issues/2205))
+
+### Features
+
+* **control-plane:** restore live graph mutation over MCP and make a late add + connect carry frames ([#2205](https://github.com/tatolab/streamlib/issues/2205)) ([6344ff1](https://github.com/tatolab/streamlib/commit/6344ff1f59d0e69cd515f19dd11415860daa026f))
+
 ## [0.18.60](https://github.com/tatolab/streamlib/compare/v0.18.59...v0.18.60) (2026-09-07)
 
 
