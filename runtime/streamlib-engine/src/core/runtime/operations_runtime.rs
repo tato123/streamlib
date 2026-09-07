@@ -27,8 +27,26 @@ use tracing::Instrument as _;
 
 /// The context a graph mutation compiles against the moment it is logged —
 /// `Some` once the runtime is started, `None` while the graph is still being
-/// built ahead of `start()`, which commits the whole batch itself.
+/// built ahead of `start()`, which commits the whole batch itself, and `None`
+/// on a processor's own execution thread, which never waits for a compile.
 type LiveCommitContext = Option<Arc<RuntimeContext>>;
+
+thread_local! {
+    /// Set on a processor's execution thread. A mutation issued from one must
+    /// not wait for the compile: removing that very processor holds the commit
+    /// gate while it joins the thread, and the wait would never end.
+    static IS_A_PROCESSOR_EXECUTION_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Mark the calling thread as one that runs a processor, so a graph mutation it
+/// issues is left to the graph-change listener rather than compiled inline.
+pub(crate) fn mark_this_thread_as_a_processor_execution_thread() {
+    IS_A_PROCESSOR_EXECUTION_THREAD.with(|marker| marker.set(true));
+}
+
+fn this_thread_may_commit_inline() -> bool {
+    !IS_A_PROCESSOR_EXECUTION_THREAD.with(|marker| marker.get())
+}
 
 /// Compile the operations a mutation just logged, so the caller learns whether
 /// its change took. A batch that fails to spawn or wire is otherwise discarded
@@ -380,8 +398,13 @@ async fn disconnect_impl(
 
 impl Runner {
     /// The context a graph mutation compiles against right away, or `None`
-    /// while the graph is still being built ahead of `start()`.
+    /// while the graph is still being built ahead of `start()` — and `None`
+    /// from a processor's own execution thread, where the mutation is left to
+    /// the graph-change listener as every mutation was before inline commits.
     fn live_commit_context(&self) -> LiveCommitContext {
+        if !this_thread_may_commit_inline() {
+            return None;
+        }
         if *self.status.lock() != RuntimeStatus::Started {
             return None;
         }
@@ -645,6 +668,31 @@ impl RuntimeOperations for Runner {
 
     fn to_json(&self) -> Result<serde_json::Value> {
         Runner::to_json(self)
+    }
+}
+
+#[cfg(test)]
+mod inline_commit_thread_guard_tests {
+    use super::*;
+
+    /// The guard is per thread: a processor's thread opts out of inline
+    /// commits and no other thread is affected by it.
+    #[test]
+    fn a_processor_execution_thread_never_commits_inline_and_other_threads_still_do() {
+        assert!(this_thread_may_commit_inline());
+
+        let from_a_processor_thread = std::thread::spawn(|| {
+            mark_this_thread_as_a_processor_execution_thread();
+            this_thread_may_commit_inline()
+        })
+        .join()
+        .expect("the marked thread finishes");
+        assert!(
+            !from_a_processor_thread,
+            "a processor's thread must not wait for a compile"
+        );
+
+        assert!(this_thread_may_commit_inline(), "the marker is per thread");
     }
 }
 

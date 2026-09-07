@@ -23,7 +23,8 @@ const PAUSE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 
 /// Sleep cadence for the no-fd-waiter fallback paths (non-Linux, or the
 /// rare case where epoll setup fails on Linux). Reactive mode on Linux
-/// with a working waiter uses `epoll_wait(-1)` and never sleeps.
+/// with a working waiter blocks in `epoll_wait` up to `REACTIVE_WAIT_BOUND_MS`
+/// and never sleeps.
 const NO_WAITER_FALLBACK_SLEEP: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Run the processor thread main loop based on execution mode.
@@ -170,8 +171,9 @@ fn run_reactive_mode(
 ) {
     // Reactive mode waits on two fds via epoll: the destination's iceoryx2
     // Listener fd (any upstream Notifier::notify() wakes the loop) and the
-    // shutdown eventfd (compiler signals teardown). epoll_wait blocks
-    // indefinitely — idle CPU is truly zero until one of those fds fires.
+    // shutdown eventfd (compiler signals teardown). epoll_wait blocks until
+    // one of those fds fires or its bound elapses — idle CPU is a wake every
+    // REACTIVE_WAIT_BOUND_MS and nothing more.
     //
     // Processors with no Rust-side listener fd (subprocess host, audio-only,
     // etc.) fall through to the channel-poll sleep loop, waking at
@@ -181,10 +183,10 @@ fn run_reactive_mode(
     // cadence and goes back to sleep. That is the same rule the helper loop
     // has always applied to every Python processor.
     //
-    // The listener is looked for on every pass until one is found, not once
-    // before the loop: a processor added to a running graph gets its first
-    // inbound link — and with it the listener — only when a later connect
-    // wires it.
+    // The listener is followed on every pass, not registered once before the
+    // loop: a processor added to a running graph gets its first inbound link
+    // — and with it the listener — only when a later connect wires it, and a
+    // destination whose last link went away gets a new listener with the next.
     #[cfg(target_os = "linux")]
     let mut shutdown_eventfd = shutdown_eventfd;
     #[cfg(target_os = "linux")]
@@ -196,26 +198,22 @@ fn run_reactive_mode(
 
     loop {
         #[cfg(target_os = "linux")]
-        if waiter.is_none() && !epoll_setup_failed {
-            let listener_fd = {
+        {
+            let (listener_fd, listener_generation) = {
                 let guard = processor.lock();
-                guard
-                    .iceoryx2_input_mailboxes_inner()
-                    .and_then(|inner| inner.listener_fd())
-            };
-            if let Some(fd) = listener_fd {
-                match ReactiveLoopFdWaiter::new(fd, shutdown_eventfd.take()) {
-                    Ok(w) => waiter = Some(w),
-                    Err(e) => {
-                        tracing::warn!(
-                            "[{}] Reactive epoll setup failed, falling back to channel-poll loop: {}",
-                            id,
-                            e
-                        );
-                        epoll_setup_failed = true;
-                    }
+                match guard.iceoryx2_input_mailboxes_inner() {
+                    Some(inner) => (inner.listener_fd(), inner.listener_generation()),
+                    None => (None, 0),
                 }
-            }
+            };
+            refresh_reactive_loop_waiter(
+                id,
+                &mut waiter,
+                &mut shutdown_eventfd,
+                &mut epoll_setup_failed,
+                listener_fd,
+                listener_generation,
+            );
         }
 
         // Channel-side shutdown check covers two paths:
@@ -260,7 +258,9 @@ fn run_reactive_mode(
                     tracing::info!("[{}] Received shutdown via eventfd", id);
                     break;
                 }
-                ReactiveLoopWakeOutcome::Interrupted => continue,
+                ReactiveLoopWakeOutcome::Interrupted | ReactiveLoopWakeOutcome::TimedOut => {
+                    continue;
+                }
                 ReactiveLoopWakeOutcome::Error => {
                     std::thread::sleep(NO_WAITER_FALLBACK_SLEEP);
                     drain_input_listener(processor);
@@ -366,8 +366,54 @@ enum ReactiveLoopWakeOutcome {
     Shutdown,
     /// `epoll_wait` was interrupted by a signal (`EINTR`); caller should retry.
     Interrupted,
+    /// Nothing fired within the bounded wait; the caller comes round to check
+    /// whether its listener is still the one the mailboxes hold.
+    TimedOut,
     /// `epoll_wait` returned an unrecoverable error.
     Error,
+}
+
+/// Keep the waiter on the listener the mailboxes hold now.
+///
+/// A listener goes with a destination's last inbound link and comes back with
+/// the next one, and an epoll set never learns of the new fd on its own — a
+/// closed fd simply leaves it. So a waiter built for an earlier generation, or
+/// for a listener that is gone, is released with its shutdown eventfd
+/// recovered, and one is built for the current listener when there is one.
+#[cfg(target_os = "linux")]
+fn refresh_reactive_loop_waiter(
+    id: &ProcessorUniqueId,
+    waiter: &mut Option<ReactiveLoopFdWaiter>,
+    shutdown_eventfd: &mut Option<OwnedFd>,
+    epoll_setup_failed: &mut bool,
+    listener_fd: Option<i32>,
+    listener_generation: u64,
+) {
+    let registered_listener_is_gone = waiter.as_ref().is_some_and(|registered| {
+        listener_fd.is_none() || registered.listener_generation != listener_generation
+    });
+    if registered_listener_is_gone {
+        *shutdown_eventfd = waiter
+            .take()
+            .and_then(ReactiveLoopFdWaiter::into_shutdown_eventfd);
+    }
+    if waiter.is_some() || *epoll_setup_failed {
+        return;
+    }
+    let Some(fd) = listener_fd else {
+        return;
+    };
+    match ReactiveLoopFdWaiter::new(fd, listener_generation, shutdown_eventfd.take()) {
+        Ok(built) => *waiter = Some(built),
+        Err(e) => {
+            tracing::warn!(
+                "[{}] Reactive epoll setup failed, falling back to channel-poll loop: {}",
+                id,
+                e
+            );
+            *epoll_setup_failed = true;
+        }
+    }
 }
 
 /// Tag stored in `epoll_event.u64` for the shutdown eventfd; chosen so it
@@ -380,15 +426,29 @@ const SHUTDOWN_EVENTFD_TAG: u64 = u64::MAX;
 #[cfg(target_os = "linux")]
 struct ReactiveLoopFdWaiter {
     epoll_fd: i32,
+    /// Which of the destination's listeners this waiter registered, by the
+    /// generation the mailboxes assigned it. A listener created after the last
+    /// inbound link went away is a new fd the epoll set never saw.
+    listener_generation: u64,
     /// Stored to keep the kernel-side eventfd alive for the lifetime of the
     /// epoll registration. Closing the fd before the epoll fd would leave a
     /// dangling registration that never fires.
-    _shutdown_eventfd: Option<OwnedFd>,
+    shutdown_eventfd: Option<OwnedFd>,
 }
+
+/// How long a reactive wait blocks before returning empty-handed, so a runner
+/// whose listener was replaced while it slept comes round to rebuild its
+/// waiter rather than sleeping on a dead fd until shutdown.
+#[cfg(target_os = "linux")]
+const REACTIVE_WAIT_BOUND_MS: i32 = 500;
 
 #[cfg(target_os = "linux")]
 impl ReactiveLoopFdWaiter {
-    fn new(listener_fd: i32, shutdown_eventfd: Option<OwnedFd>) -> std::io::Result<Self> {
+    fn new(
+        listener_fd: i32,
+        listener_generation: u64,
+        shutdown_eventfd: Option<OwnedFd>,
+    ) -> std::io::Result<Self> {
         use std::os::fd::AsRawFd;
 
         // SAFETY: epoll_create1 returns -1 on failure; checked below.
@@ -426,16 +486,30 @@ impl ReactiveLoopFdWaiter {
 
         Ok(Self {
             epoll_fd,
-            _shutdown_eventfd: shutdown_eventfd,
+            listener_generation,
+            shutdown_eventfd,
         })
+    }
+
+    /// Release the epoll registration and hand back the shutdown eventfd, so
+    /// the next waiter can register it.
+    fn into_shutdown_eventfd(mut self) -> Option<OwnedFd> {
+        self.shutdown_eventfd.take()
     }
 
     fn wait(&self) -> ReactiveLoopWakeOutcome {
         let mut events = [libc::epoll_event { events: 0, u64: 0 }; 2];
-        // -1 = block forever. Wakes only when one of the registered fds is
-        // actually readable, or a signal interrupts the call.
+        // Wakes when one of the registered fds is readable, a signal interrupts
+        // the call, or the bound elapses with nothing to report.
         // SAFETY: epoll_wait writes up to events.len() events into the buffer.
-        let n = unsafe { libc::epoll_wait(self.epoll_fd, events.as_mut_ptr(), 2, -1) };
+        let n = unsafe {
+            libc::epoll_wait(
+                self.epoll_fd,
+                events.as_mut_ptr(),
+                2,
+                REACTIVE_WAIT_BOUND_MS,
+            )
+        };
         if n < 0 {
             let err = std::io::Error::last_os_error();
             if err.kind() == std::io::ErrorKind::Interrupted {
@@ -443,6 +517,9 @@ impl ReactiveLoopFdWaiter {
             }
             tracing::warn!("epoll_wait failed in reactive runner: {}", err);
             return ReactiveLoopWakeOutcome::Error;
+        }
+        if n == 0 {
+            return ReactiveLoopWakeOutcome::TimedOut;
         }
 
         // Shutdown takes priority over notify when both fired in the same
@@ -866,7 +943,7 @@ mod tests {
         // thread because we join it before this function returns).
         let listener_fd = unsafe { listener.file_descriptor().native_handle() };
         let waiter =
-            ReactiveLoopFdWaiter::new(listener_fd, Some(make_eventfd())).expect("epoll setup");
+            ReactiveLoopFdWaiter::new(listener_fd, 1, Some(make_eventfd())).expect("epoll setup");
 
         // Move the waiter to a worker thread, then fire notify() from this
         // thread. The worker reports the outcome and elapsed time back via
@@ -931,7 +1008,7 @@ mod tests {
         let shutdown_raw = shutdown_eventfd.as_raw_fd();
 
         let waiter =
-            ReactiveLoopFdWaiter::new(listener_fd, Some(shutdown_eventfd)).expect("epoll setup");
+            ReactiveLoopFdWaiter::new(listener_fd, 1, Some(shutdown_eventfd)).expect("epoll setup");
 
         let (tx, rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
@@ -959,6 +1036,151 @@ mod tests {
             elapsed < std::time::Duration::from_millis(50),
             "shutdown wake latency too high: {:?} (eventfd write scheduled 5 ms in)",
             elapsed
+        );
+    }
+
+    /// A destination that loses its last inbound link drops its listener, and
+    /// the next connect creates a new one the epoll set never saw. The runner
+    /// keeps its waiter on the listener the mailboxes hold now, so a frame on
+    /// the reconnected link wakes it. Revert lock: register the listener once
+    /// before the loop and the second notify below wakes nothing.
+    #[test]
+    fn the_waiter_follows_a_listener_replaced_after_the_last_link_went_away() {
+        let node = NodeBuilder::new().create::<ipc::Service>().unwrap();
+        let open_event_service = |suffix: &str| {
+            node.service_builder(&ServiceName::new(&unique_suffix(suffix)).unwrap())
+                .event()
+                .max_notifiers(1)
+                .max_listeners(1)
+                .open_or_create()
+                .unwrap()
+        };
+        let id: ProcessorUniqueId = "Preactive".into();
+        let mut waiter = None;
+        let mut shutdown_eventfd = Some(make_eventfd());
+        let mut epoll_setup_failed = false;
+
+        let first = open_event_service("replaced-first");
+        let first_listener = first.listener_builder().create().unwrap();
+        // SAFETY: the fd is used only while `first_listener` is alive.
+        let first_fd = unsafe { first_listener.file_descriptor().native_handle() };
+        refresh_reactive_loop_waiter(
+            &id,
+            &mut waiter,
+            &mut shutdown_eventfd,
+            &mut epoll_setup_failed,
+            Some(first_fd),
+            1,
+        );
+        let first_epoll_fd = waiter
+            .as_ref()
+            .expect("a waiter for the first listener")
+            .epoll_fd;
+        assert!(
+            shutdown_eventfd.is_none(),
+            "the waiter took the shutdown eventfd"
+        );
+
+        refresh_reactive_loop_waiter(
+            &id,
+            &mut waiter,
+            &mut shutdown_eventfd,
+            &mut epoll_setup_failed,
+            Some(first_fd),
+            1,
+        );
+        assert_eq!(
+            waiter.as_ref().map(|registered| registered.epoll_fd),
+            Some(first_epoll_fd),
+            "the same listener keeps the same waiter"
+        );
+
+        // The last link goes, and the listener with it.
+        drop(first_listener);
+        refresh_reactive_loop_waiter(
+            &id,
+            &mut waiter,
+            &mut shutdown_eventfd,
+            &mut epoll_setup_failed,
+            None,
+            1,
+        );
+        assert!(
+            waiter.is_none(),
+            "a waiter on a dropped listener is released"
+        );
+        assert!(
+            shutdown_eventfd.is_some(),
+            "the shutdown eventfd comes back for the next one"
+        );
+
+        // A reconnect creates a new listener, on a fresh notify service.
+        let second = open_event_service("replaced-second");
+        let second_listener = second.listener_builder().create().unwrap();
+        // SAFETY: the fd is used only while `second_listener` is alive; the
+        // worker below is joined before this function returns.
+        let second_fd = unsafe { second_listener.file_descriptor().native_handle() };
+        refresh_reactive_loop_waiter(
+            &id,
+            &mut waiter,
+            &mut shutdown_eventfd,
+            &mut epoll_setup_failed,
+            Some(second_fd),
+            2,
+        );
+        let waiter = waiter.expect("a waiter for the new listener");
+        let notifier = second.notifier_builder().create().unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let outcome = waiter.wait();
+            tx.send(outcome).unwrap();
+            waiter
+        });
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        notifier.notify().unwrap();
+        let outcome = rx
+            .recv_timeout(std::time::Duration::from_millis(800))
+            .expect("the worker did not respond — the new listener never woke the waiter");
+        let _waiter = worker.join().expect("worker panicked");
+        assert!(
+            matches!(outcome, ReactiveLoopWakeOutcome::Notified),
+            "a notify on the reconnected link must wake the runner; got {outcome:?}"
+        );
+        second_listener.try_wait_all(|_| {}).unwrap();
+    }
+
+    /// A wait with nothing to report returns on its own, which is what lets a
+    /// runner whose listener was replaced while it slept come round to rebuild
+    /// rather than sleeping on a dead fd until shutdown.
+    #[test]
+    fn a_wait_with_nothing_to_report_returns_at_its_bound() {
+        let node = NodeBuilder::new().create::<ipc::Service>().unwrap();
+        let svc = node
+            .service_builder(&ServiceName::new(&unique_suffix("bounded-wait")).unwrap())
+            .event()
+            .max_notifiers(1)
+            .max_listeners(1)
+            .open_or_create()
+            .unwrap();
+        let listener = svc.listener_builder().create().unwrap();
+        // SAFETY: the fd is used only while `listener` is alive.
+        let listener_fd = unsafe { listener.file_descriptor().native_handle() };
+        let waiter =
+            ReactiveLoopFdWaiter::new(listener_fd, 1, Some(make_eventfd())).expect("epoll setup");
+
+        let started = std::time::Instant::now();
+        let outcome = waiter.wait();
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(outcome, ReactiveLoopWakeOutcome::TimedOut),
+            "an idle wait must time out rather than block; got {outcome:?}"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_millis(REACTIVE_WAIT_BOUND_MS as u64 - 50)
+                && elapsed < std::time::Duration::from_secs(3),
+            "the wait must return at its bound; took {elapsed:?}"
         );
     }
 }

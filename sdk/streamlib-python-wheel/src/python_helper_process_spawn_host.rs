@@ -638,13 +638,21 @@ impl DynGeneratedProcessor for PythonHelperProcessSpawnHostProcessor {
     /// same reasons `unwire_out_of_process_link` is.
     ///
     /// Before `setup` there is no bridge and nothing to send: the setup command
-    /// reads the envelope, which already carries this link.
+    /// reads the envelope, which already carries this link. A child that has
+    /// died is refused instead, so the compile wiring the link fails and its
+    /// caller hears it rather than reading a wired link nothing will cross.
     fn wire_out_of_process_link(
         &mut self,
         port_direction: streamlib::sdk::error::PortDirection,
         link_wiring: &serde_json::Value,
     ) -> Result<()> {
-        if self.has_failed_unrecoverably() || self.bridge.is_none() {
+        if self.has_failed_unrecoverably() {
+            return Err(Error::Runtime(format!(
+                "processor '{}' ({}) has failed, so no link can be wired into it",
+                self.processor_display_name, self.processor_id
+            )));
+        }
+        if self.bridge.is_none() {
             return Ok(());
         }
         self.send_to_child(&serde_json::json!({
@@ -809,6 +817,29 @@ mod tests {
             child_is_gone: false,
             link_wiring: OutOfProcessLinkWiringEnvelope::default(),
         }
+    }
+
+    /// A link wired into a helper that has died is refused, so the compile
+    /// wiring it fails and the caller hears it; before setup the same call is
+    /// a no-op, because the setup command carries the envelope.
+    #[test]
+    fn a_late_link_into_a_failed_helper_is_refused_and_one_before_setup_is_not() {
+        let link_wiring = serde_json::json!({"link_id": "L-late", "name": "frames_from_upstream"});
+
+        let mut failed = spawn_host_for_test(None);
+        failed.child_is_gone = true;
+        let refused = failed
+            .wire_out_of_process_link(streamlib::sdk::error::PortDirection::Input, &link_wiring)
+            .expect_err("a dead child can open no port");
+        assert!(
+            refused.to_string().contains("has failed"),
+            "the refusal names the failure; got {refused}"
+        );
+
+        let mut not_yet_set_up = spawn_host_for_test(None);
+        not_yet_set_up
+            .wire_out_of_process_link(streamlib::sdk::error::PortDirection::Input, &link_wiring)
+            .expect("before setup the envelope carries the link");
     }
 
     /// The child is an exec of the app's own interpreter running the helper

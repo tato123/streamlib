@@ -456,6 +456,9 @@ pub struct InputMailboxesInner {
     ports: parking_lot::Mutex<HashMap<String, PortConfig>>,
     subscribers: SendableChannelSubscribers,
     listener: SendableListener,
+    /// Counts every listener installed, so a runner can tell a listener
+    /// created after its last link went away from the one it registered.
+    listener_generation: std::sync::atomic::AtomicU64,
     dropped_bag_counts: Arc<DroppedBagCountsByInboundLink>,
     device_matched_audio_window_contracts: Arc<DeviceMatchedAudioWindowContractsByInputPort>,
 }
@@ -467,6 +470,7 @@ impl InputMailboxesInner {
             ports: parking_lot::Mutex::new(HashMap::new()),
             subscribers: SendableChannelSubscribers::new(),
             listener: SendableListener::new(),
+            listener_generation: std::sync::atomic::AtomicU64::new(0),
             dropped_bag_counts: Arc::new(DroppedBagCountsByInboundLink::default()),
             device_matched_audio_window_contracts: Arc::new(
                 DeviceMatchedAudioWindowContractsByInputPort::default(),
@@ -778,6 +782,16 @@ impl InputMailboxesInner {
     /// Note: This should only be called from the processor's execution thread.
     pub fn set_listener(&self, listener: Listener<ipc::Service>) {
         self.listener.set(listener);
+        self.listener_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
+    /// How many listeners have been installed so far. A runner that built its
+    /// waiter for an earlier generation is watching an fd that no longer
+    /// belongs to this destination.
+    pub fn listener_generation(&self) -> u64 {
+        self.listener_generation
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Returns the underlying listener fd if a listener has been configured.
