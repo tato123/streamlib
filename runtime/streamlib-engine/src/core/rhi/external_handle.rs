@@ -111,13 +111,18 @@ pub trait RhiPixelBufferImport {
 
     /// Import a multi-plane GPU buffer from one external handle per plane.
     ///
+    /// Takes the handles by value because on Linux the fd inside each one
+    /// is consumed: handed to the driver at its import or closed before
+    /// that, so the caller holds nothing after the call whatever its
+    /// outcome.
+    ///
     /// The default implementation only accepts a single-plane input —
     /// backends that can't natively represent multiple planes still
     /// compile and refuse multi-plane input at runtime. Linux overrides
     /// with a real multi-plane import so the Rust surface-store path
     /// keeps feature parity with the polyglot Python and Deno shims.
     fn from_external_plane_handles(
-        handles: &[RhiExternalHandle],
+        handles: Vec<RhiExternalHandle>,
         width: u32,
         height: u32,
         format: super::PixelFormat,
@@ -125,9 +130,10 @@ pub trait RhiPixelBufferImport {
     where
         Self: Sized,
     {
-        match handles {
-            [only] => Self::from_external_handle(only.clone(), width, height, format),
-            [] => Err(crate::core::Error::Configuration(
+        let mut handles = handles.into_iter();
+        match (handles.next(), handles.next()) {
+            (Some(only), None) => Self::from_external_handle(only, width, height, format),
+            (None, _) => Err(crate::core::Error::Configuration(
                 "from_external_plane_handles: empty plane vec".into(),
             )),
             _ => Err(crate::core::Error::NotSupported(
@@ -157,16 +163,12 @@ impl RhiPixelBufferImport for super::PixelBuffer {
         height: u32,
         format: super::PixelFormat,
     ) -> Result<Self> {
-        Self::from_external_plane_handles(&[handle], width, height, format)
+        Self::from_external_plane_handles(vec![handle], width, height, format)
     }
 
-    /// Import one DMA-BUF fd per plane.
-    ///
-    /// Consumes every plane fd: each is handed to the driver at its
-    /// import or closed here before that, so the caller holds nothing
-    /// after the call whatever its outcome.
+    /// Import one DMA-BUF fd per plane; see the trait for the fd contract.
     fn from_external_plane_handles(
-        handles: &[RhiExternalHandle],
+        handles: Vec<RhiExternalHandle>,
         width: u32,
         height: u32,
         format: super::PixelFormat,
@@ -177,7 +179,7 @@ impl RhiPixelBufferImport for super::PixelBuffer {
         // fd rather than only the ones a loop reached.
         let mut plane_fds: Vec<OwnedFd> = Vec::with_capacity(handles.len());
         let mut handles_include_an_opaque_fd_plane = false;
-        for handle in handles {
+        for handle in &handles {
             let fd = match *handle {
                 RhiExternalHandle::DmaBuf { fd, .. } => fd,
                 RhiExternalHandle::OpaqueFd { fd, .. } => {
@@ -342,7 +344,7 @@ mod tests {
         let opaque_plane = PlaneFdUnderTest::mint();
         let result =
             <super::super::PixelBuffer as RhiPixelBufferImport>::from_external_plane_handles(
-                &[
+                vec![
                     RhiExternalHandle::DmaBuf {
                         fd: dma_buf_plane.plane_fd,
                         size: 4096,

@@ -3950,6 +3950,59 @@ unsafe impl Sync for HostVulkanDevice {}
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    fn inode_of(fd: std::os::unix::io::RawFd) -> Option<u64> {
+        let mut file_status = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(fd, file_status.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        Some(unsafe { file_status.assume_init() }.st_ino as u64)
+    }
+
+    /// The one exit of the import that is ours to close: no memory type
+    /// matches, so the fd never reaches `vkAllocateMemory` and nobody but
+    /// this function ever held it.
+    #[cfg(target_os = "linux")]
+    #[cfg_attr(
+        not(feature = "hardware-tests"),
+        ignore = "hardware integration — set --features streamlib/hardware-tests + run with --test-threads=1. See docs/testing-hardware.md"
+    )]
+    #[test]
+    fn a_memory_type_refusal_before_the_import_closes_the_fd_it_was_handed() {
+        use std::os::fd::{FromRawFd as _, OwnedFd};
+
+        let device = match HostVulkanDevice::new() {
+            Ok(d) => d,
+            Err(_) => {
+                println!("Skipping - no Vulkan device available");
+                return;
+            }
+        };
+        let source =
+            crate::vulkan::rhi::HostVulkanBuffer::new_storage_buffer_host_visible(&device, 4096)
+                .expect("source buffer allocation failed");
+        let fd = source.export_dma_buf_fd().expect("DMA-BUF export failed");
+        let inode = inode_of(fd).expect("an exported DMA-BUF must stat");
+
+        let refusal = device
+            .import_dma_buf_memory(
+                unsafe { OwnedFd::from_raw_fd(fd) },
+                4096,
+                0,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .expect_err("no memory type matches an empty type filter");
+        assert!(
+            refusal.to_string().contains("No suitable memory type"),
+            "the refusal must be the memory-type search, not the driver: {refusal}"
+        );
+        assert_ne!(
+            inode_of(fd),
+            Some(inode),
+            "the refused import left the DMA-BUF fd open — no owner remains to close it"
+        );
+    }
+
     /// Build a `VkPhysicalDeviceMemoryProperties` whose first
     /// `property_flags.len()` types carry the given flags.
     #[cfg(target_os = "linux")]

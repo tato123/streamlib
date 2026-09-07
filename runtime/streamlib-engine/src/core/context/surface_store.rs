@@ -1252,7 +1252,7 @@ impl SurfaceStoreInner {
         )?;
         leave_plane_fds_to_the_import(plane_fds);
         let pixel_buffer =
-            PixelBuffer::from_external_plane_handles(&handles, 0, 0, PixelFormat::default())?;
+            PixelBuffer::from_external_plane_handles(handles, 0, 0, PixelFormat::default())?;
 
         // Cache for future use
         self.cache
@@ -1745,7 +1745,7 @@ impl SurfaceStoreInner {
             })
             .collect();
         leave_plane_fds_to_the_import(plane_fds);
-        PixelBuffer::from_external_plane_handles(&handles, 0, 0, PixelFormat::default())
+        PixelBuffer::from_external_plane_handles(handles, 0, 0, PixelFormat::default())
     }
 
     /// Publish a producer's post-release `VkImageLayout` for the given
@@ -2652,6 +2652,98 @@ mod plane_fd_ownership_tests {
         assert!(
             second_plane.was_closed(),
             "the refusal left plane 1 open — no owner remains to close it"
+        );
+    }
+
+    fn a_reply_announcing(produce_done: bool, consume_done: bool) -> serde_json::Value {
+        serde_json::json!({
+            SURFACE_REPLY_HAS_PRODUCE_DONE_FD: produce_done,
+            SURFACE_REPLY_HAS_CONSUME_DONE_FD: consume_done,
+        })
+    }
+
+    /// Stand-in fds handed over as the reply's owned fds, in order. The
+    /// stand-ins outlive the owned fds so they can say which ones closed.
+    fn reply_fds_standing_in_for(stand_ins: &[ExportedPlaneFdUnderTest]) -> Vec<OwnedFd> {
+        stand_ins
+            .iter()
+            .map(|stand_in| unsafe { OwnedFd::from_raw_fd(stand_in.plane_fd) })
+            .collect()
+    }
+
+    fn raw_fds_of(owned: &[OwnedFd]) -> Vec<std::os::unix::io::RawFd> {
+        owned.iter().map(OwnedFd::as_raw_fd).collect()
+    }
+
+    #[test]
+    fn a_reply_announcing_no_edges_keeps_every_fd_as_a_plane() {
+        let stand_ins: Vec<_> = (0..3).map(|_| ExportedPlaneFdUnderTest::mint()).collect();
+        let planes = plane_fds_of_reply(
+            "lookup",
+            &a_reply_announcing(false, false),
+            reply_fds_standing_in_for(&stand_ins),
+        )
+        .expect("three fds and no edges are three planes");
+        assert_eq!(
+            raw_fds_of(&planes),
+            stand_ins.iter().map(|p| p.plane_fd).collect::<Vec<_>>()
+        );
+        assert!(stand_ins.iter().all(|plane| !plane.was_closed()));
+        drop(planes);
+        assert!(stand_ins.iter().all(|plane| plane.was_closed()));
+    }
+
+    /// The service appends `produce_done` then `consume_done` after the
+    /// planes; each announced edge comes off the end and closes, and the
+    /// planes in front of them are untouched.
+    #[test]
+    fn each_announced_edge_is_peeled_off_the_end_and_closed() {
+        for (produce_done, consume_done) in [(true, false), (false, true), (true, true)] {
+            let edge_count = usize::from(produce_done) + usize::from(consume_done);
+            let stand_ins: Vec<_> = (0..2 + edge_count)
+                .map(|_| ExportedPlaneFdUnderTest::mint())
+                .collect();
+            let planes = plane_fds_of_reply(
+                "lookup",
+                &a_reply_announcing(produce_done, consume_done),
+                reply_fds_standing_in_for(&stand_ins),
+            )
+            .expect("two planes remain once the edges are peeled");
+            assert_eq!(
+                raw_fds_of(&planes),
+                stand_ins[..2]
+                    .iter()
+                    .map(|p| p.plane_fd)
+                    .collect::<Vec<_>>(),
+                "produce_done={produce_done} consume_done={consume_done}"
+            );
+            assert!(
+                stand_ins[2..].iter().all(|edge| edge.was_closed()),
+                "an announced edge must close with the peel (produce_done={produce_done} consume_done={consume_done})"
+            );
+            assert!(stand_ins[..2].iter().all(|plane| !plane.was_closed()));
+            drop(planes);
+        }
+    }
+
+    #[test]
+    fn a_reply_shorter_than_its_flags_promise_is_refused_and_closes_what_it_carried() {
+        let stand_ins: Vec<_> = (0..2).map(|_| ExportedPlaneFdUnderTest::mint()).collect();
+        let refusal = plane_fds_of_reply(
+            "lookup",
+            &a_reply_announcing(true, true),
+            reply_fds_standing_in_for(&stand_ins),
+        )
+        .expect_err("two fds cannot carry a plane and two edges");
+        assert!(
+            refusal
+                .to_string()
+                .contains("carried 2 fds, fewer than the 3"),
+            "the refusal must name both counts: {refusal}"
+        );
+        assert!(
+            stand_ins.iter().all(|fd| fd.was_closed()),
+            "a refused reply must close every fd it carried"
         );
     }
 }
