@@ -946,23 +946,22 @@ impl HostVulkanBuffer {
         dma_buf_fds: Vec<std::os::fd::OwnedFd>,
         plane_sizes: &[vk::DeviceSize],
     ) -> Result<Self> {
-        let fds = dma_buf_fds;
-        if fds.is_empty() {
+        if dma_buf_fds.is_empty() {
             return Err(Error::Configuration(
                 "DMA-BUF import: fd vec must be non-empty".into(),
             ));
         }
-        if fds.len() != plane_sizes.len() {
+        if dma_buf_fds.len() != plane_sizes.len() {
             return Err(Error::Configuration(format!(
                 "DMA-BUF import: plane_sizes length ({}) must match fds length ({})",
                 plane_sizes.len(),
-                fds.len()
+                dma_buf_fds.len()
             )));
         }
-        if fds.len() > streamlib_surface_client::MAX_DMA_BUF_PLANES {
+        if dma_buf_fds.len() > streamlib_surface_client::MAX_DMA_BUF_PLANES {
             return Err(Error::Configuration(format!(
                 "DMA-BUF import: plane count {} exceeds MAX_DMA_BUF_PLANES ({})",
-                fds.len(),
+                dma_buf_fds.len(),
                 streamlib_surface_client::MAX_DMA_BUF_PLANES
             )));
         }
@@ -970,8 +969,9 @@ impl HostVulkanBuffer {
         // Import every plane. Stash each successful import in a vec so we
         // can unwind on partial failure; the fds not yet reached stay in
         // the iterator and close with it on the way out.
-        let mut imported: Vec<VulkanImportedPlane> = Vec::with_capacity(fds.len());
-        for (idx, (fd, &plane_size)) in fds.into_iter().zip(plane_sizes.iter()).enumerate() {
+        let mut imported: Vec<VulkanImportedPlane> = Vec::with_capacity(dma_buf_fds.len());
+        for (idx, (fd, &plane_size)) in dma_buf_fds.into_iter().zip(plane_sizes.iter()).enumerate()
+        {
             if plane_size == 0 {
                 for plane in imported.into_iter() {
                     teardown_imported_plane(vulkan_device, plane);
@@ -1195,8 +1195,6 @@ fn import_single_plane(
     dma_buf_fd: std::os::fd::OwnedFd,
     effective_size: vk::DeviceSize,
 ) -> Result<VulkanImportedPlane> {
-    use std::os::fd::IntoRawFd as _;
-
     let device = vulkan_device.device();
 
     let mut external_buffer_info = vk::ExternalMemoryBufferCreateInfo::builder()
@@ -1222,7 +1220,7 @@ fn import_single_plane(
 
     let memory = vulkan_device
         .import_dma_buf_memory(
-            dma_buf_fd.into_raw_fd(),
+            dma_buf_fd,
             alloc_size,
             mem_requirements.memory_type_bits,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,

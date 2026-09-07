@@ -3634,22 +3634,26 @@ impl HostVulkanDevice {
     /// does not support importing external memory from file descriptors.
     /// All non-import allocations go through VMA.
     ///
-    /// The fd is the driver's from this call on, whatever it returns. The
-    /// spec transfers ownership on success; the NVIDIA driver also closes
-    /// the fd on a failed import, so a caller that closes after a failure
-    /// closes whatever the kernel has since handed that number to.
+    /// Takes the fd by value: it is the driver's from `vkAllocateMemory`
+    /// on, whatever that call returns — the spec transfers ownership on
+    /// success, and the NVIDIA driver also closes the fd on a failed
+    /// import, so a close after the call lands on whatever the kernel has
+    /// since handed that number to — and it is closed here on the one
+    /// exit before that call.
     pub fn import_dma_buf_memory(
         &self,
-        fd: i32,
+        dma_buf_fd: std::os::fd::OwnedFd,
         allocation_size: vk::DeviceSize,
         memory_type_bits: u32,
         preferred_flags: vk::MemoryPropertyFlags,
     ) -> Result<vk::DeviceMemory> {
+        use std::os::fd::IntoRawFd as _;
+
         let memory_type_index = self.find_memory_type(memory_type_bits, preferred_flags)?;
 
         let mut import_info = vk::ImportMemoryFdInfoKHR::builder()
             .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
-            .fd(fd)
+            .fd(dma_buf_fd.into_raw_fd())
             .build();
 
         let alloc_info = vk::MemoryAllocateInfo::builder()
@@ -4412,7 +4416,7 @@ mod tests {
         let mem_reqs = unsafe { device.device().get_buffer_memory_requirements(buffer) };
         let _imported = device
             .import_dma_buf_memory(
-                fd,
+                unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) },
                 mem_reqs.size.max(buffer_size),
                 mem_reqs.memory_type_bits,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,

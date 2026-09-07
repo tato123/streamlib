@@ -155,6 +155,16 @@ const SURFACE_RESOURCE_TYPE_TEXTURE: &str = "texture";
 #[cfg(target_os = "linux")]
 const SURFACE_RESOURCE_TYPE_PIXEL_BUFFER: &str = "pixel_buffer";
 
+/// Reply flag announcing a `produce_done` timeline edge appended after the
+/// plane fds.
+#[cfg(target_os = "linux")]
+const SURFACE_REPLY_HAS_PRODUCE_DONE_FD: &str = "has_produce_done_fd";
+
+/// Reply flag announcing a `consume_done` timeline edge appended after the
+/// plane fds (and after `produce_done` when both are present).
+#[cfg(target_os = "linux")]
+const SURFACE_REPLY_HAS_CONSUME_DONE_FD: &str = "has_consume_done_fd";
+
 /// Wrap each received fd as the external-handle flavour the surface-share
 /// service registered it under.
 ///
@@ -210,17 +220,46 @@ fn adopt_reply_fds(received_fds: Vec<std::os::fd::RawFd>) -> Vec<OwnedFd> {
         .collect()
 }
 
-/// Close the timeline edges a lookup reply appends after the plane fds.
+/// The plane fds of a lookup reply, with the timeline edges the service
+/// appends after them closed.
 ///
 /// The service announces each appended edge with a flag; a host-side
-/// lookup imports planes only.
+/// lookup imports planes only. A reply carrying fewer fds than its flags
+/// promise is refused rather than read as a shorter plane list.
 #[cfg(target_os = "linux")]
-fn keep_only_the_plane_fds(response: &serde_json::Value, reply_fds: &mut Vec<OwnedFd>) {
-    let appended_edges = ["has_produce_done_fd", "has_consume_done_fd"]
-        .iter()
-        .filter(|flag| response.get(*flag).and_then(serde_json::Value::as_bool) == Some(true))
-        .count();
-    reply_fds.truncate(reply_fds.len().saturating_sub(appended_edges));
+fn plane_fds_of_reply(
+    operation: &str,
+    response: &serde_json::Value,
+    mut reply_fds: Vec<OwnedFd>,
+) -> Result<Vec<OwnedFd>> {
+    let appended_edges = [
+        SURFACE_REPLY_HAS_PRODUCE_DONE_FD,
+        SURFACE_REPLY_HAS_CONSUME_DONE_FD,
+    ]
+    .iter()
+    .filter(|flag| response.get(*flag).and_then(serde_json::Value::as_bool) == Some(true))
+    .count();
+    if reply_fds.len() < appended_edges + 1 {
+        return Err(Error::Configuration(format!(
+            "{operation}: the reply carried {} fds, fewer than the {} its flags promise",
+            reply_fds.len(),
+            appended_edges + 1
+        )));
+    }
+    reply_fds.truncate(reply_fds.len() - appended_edges);
+    Ok(reply_fds)
+}
+
+/// The `plane_sizes` a lookup reply states, one per plane fd; zeros when
+/// the reply states none or a different count.
+#[cfg(target_os = "linux")]
+fn plane_sizes_of_reply(response: &serde_json::Value, plane_count: usize) -> Vec<u64> {
+    response
+        .get("plane_sizes")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
+        .filter(|v: &Vec<u64>| v.len() == plane_count)
+        .unwrap_or_else(|| vec![0u64; plane_count])
 }
 
 /// Release the plane fds to the pixel-buffer import about to take them,
@@ -1181,10 +1220,10 @@ impl SurfaceStoreInner {
             stream,
             &request,
             &[],
-            streamlib_surface_client::MAX_DMA_BUF_PLANES,
+            streamlib_surface_client::MAX_SCM_RIGHTS_FDS,
         )
         .map_err(|e| Error::Configuration(format!("Unix socket check_out failed: {}", e)))?;
-        let mut plane_fds = adopt_reply_fds(received_fds);
+        let reply_fds = adopt_reply_fds(received_fds);
 
         if let Some(error) = response
             .get("error")
@@ -1192,13 +1231,7 @@ impl SurfaceStoreInner {
         {
             return Err(Error::Configuration(format!("check_out: {}", error)));
         }
-
-        keep_only_the_plane_fds(&response, &mut plane_fds);
-        if plane_fds.is_empty() {
-            return Err(Error::Configuration(
-                "check_out: no DMA-BUF fd in response".into(),
-            ));
-        }
+        let plane_fds = plane_fds_of_reply("check_out", &response, reply_fds)?;
 
         // Import every plane under the flavour the service says it registered.
         // The two flavours are different Vulkan external-handle types, so
@@ -1206,13 +1239,7 @@ impl SurfaceStoreInner {
         // rather than a clean failure.
         use crate::core::rhi::{PixelFormat, RhiPixelBufferImport};
 
-        let plane_sizes: Vec<u64> = response
-            .get("plane_sizes")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
-            .filter(|v: &Vec<u64>| v.len() == plane_fds.len())
-            .unwrap_or_else(|| vec![0u64; plane_fds.len()]);
-
+        let plane_sizes = plane_sizes_of_reply(&response, plane_fds.len());
         let raw_plane_fds: Vec<std::os::fd::RawFd> =
             plane_fds.iter().map(OwnedFd::as_raw_fd).collect();
         let handles = external_plane_handles_for_flavour(
@@ -1517,8 +1544,8 @@ impl SurfaceStoreInner {
                 "plane_offsets": [0u64],
                 "plane_strides": [0u64],
                 "drm_format_modifier": 0u64,
-                "has_produce_done_fd": produce_done_fd.is_some(),
-                "has_consume_done_fd": consume_done_fd.is_some(),
+                SURFACE_REPLY_HAS_PRODUCE_DONE_FD: produce_done_fd.is_some(),
+                SURFACE_REPLY_HAS_CONSUME_DONE_FD: consume_done_fd.is_some(),
                 "current_image_layout": current_image_layout.as_vk().as_raw(),
                 "vk_image_type": VK_IMAGE_TYPE_2D,
                 "vk_image_mip_levels": 1u32,
@@ -1621,8 +1648,8 @@ impl SurfaceStoreInner {
             "handle_type": exported_planes.handle_type,
             "plane_sizes": exported_planes.plane_sizes,
             "plane_offsets": exported_planes.plane_offsets,
-            "has_produce_done_fd": produce_done_fd.is_some(),
-            "has_consume_done_fd": consume_done_fd.is_some(),
+            SURFACE_REPLY_HAS_PRODUCE_DONE_FD: produce_done_fd.is_some(),
+            SURFACE_REPLY_HAS_CONSUME_DONE_FD: consume_done_fd.is_some(),
         });
 
         let mut wire_fds_in_published_order = exported_planes.plane_fds;
@@ -1672,10 +1699,10 @@ impl SurfaceStoreInner {
             stream,
             &request,
             &[],
-            streamlib_surface_client::MAX_DMA_BUF_PLANES,
+            streamlib_surface_client::MAX_SCM_RIGHTS_FDS,
         )
         .map_err(|e| Error::Configuration(format!("Unix socket lookup failed: {}", e)))?;
-        let mut plane_fds = adopt_reply_fds(received_fds);
+        let reply_fds = adopt_reply_fds(received_fds);
 
         if let Some(error) = response
             .get("error")
@@ -1683,13 +1710,7 @@ impl SurfaceStoreInner {
         {
             return Err(Error::Configuration(format!("lookup: {}", error)));
         }
-
-        keep_only_the_plane_fds(&response, &mut plane_fds);
-        if plane_fds.is_empty() {
-            return Err(Error::Configuration(
-                "lookup: no memory fd in response".into(),
-            ));
-        }
+        let plane_fds = plane_fds_of_reply("lookup", &response, reply_fds)?;
 
         // Dispatch on the wire-level handle type. OPAQUE_FD lookups can't
         // construct a host-side `PixelBuffer` (that import path is
@@ -1699,7 +1720,7 @@ impl SurfaceStoreInner {
         let handle_type = response
             .get("handle_type")
             .and_then(|v| v.as_str())
-            .unwrap_or("dma_buf");
+            .unwrap_or(SURFACE_HANDLE_TYPE_DMA_BUF);
 
         if handle_type == SURFACE_HANDLE_TYPE_OPAQUE_FD {
             return Err(Error::NotSupported(
@@ -1714,13 +1735,7 @@ impl SurfaceStoreInner {
 
         use crate::core::rhi::{PixelFormat, RhiExternalHandle, RhiPixelBufferImport};
 
-        let plane_sizes: Vec<u64> = response
-            .get("plane_sizes")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
-            .filter(|v: &Vec<u64>| v.len() == plane_fds.len())
-            .unwrap_or_else(|| vec![0u64; plane_fds.len()]);
-
+        let plane_sizes = plane_sizes_of_reply(&response, plane_fds.len());
         let handles: Vec<RhiExternalHandle> = plane_fds
             .iter()
             .zip(plane_sizes.iter())
@@ -1808,10 +1823,10 @@ impl SurfaceStoreInner {
             stream,
             &request,
             &[],
-            streamlib_surface_client::MAX_DMA_BUF_PLANES,
+            streamlib_surface_client::MAX_SCM_RIGHTS_FDS,
         )
         .map_err(|e| Error::Configuration(format!("Unix socket lookup_texture failed: {}", e)))?;
-        let mut reply_fds = adopt_reply_fds(received_fds);
+        let reply_fds = adopt_reply_fds(received_fds);
 
         if let Some(error) = response
             .get("error")
@@ -1833,13 +1848,13 @@ impl SurfaceStoreInner {
             )));
         }
 
-        if reply_fds.is_empty() {
-            return Err(Error::Configuration(
-                "lookup_texture: no DMA-BUF fd in response".into(),
-            ));
-        }
-        let dma_buf_fd = reply_fds.remove(0);
-        drop(reply_fds);
+        // A texture registration carries one plane; anything past it closes
+        // here.
+        let mut plane_fds = plane_fds_of_reply("lookup_texture", &response, reply_fds)?.into_iter();
+        let dma_buf_fd = plane_fds
+            .next()
+            .expect("plane_fds_of_reply refuses an empty plane list");
+        drop(plane_fds);
 
         // Extract width, height, format from the response
         let width = response
@@ -2127,8 +2142,8 @@ fn surface_export_staging_registration_payload(
         "handle_type": SURFACE_HANDLE_TYPE_OPAQUE_FD,
         "plane_sizes": [staging_byte_size],
         "plane_offsets": [0],
-        "has_produce_done_fd": true,
-        "has_consume_done_fd": false,
+        SURFACE_REPLY_HAS_PRODUCE_DONE_FD: true,
+        SURFACE_REPLY_HAS_CONSUME_DONE_FD: false,
         "vk_memory_type_index": memory_type_index,
     })
 }
@@ -2177,8 +2192,8 @@ fn dma_buf_texture_registration_payload(
         // deriving it from extent × stride under-sizes tiled allocations and
         // fails the bind.
         "vk_image_allocation_size": texture.vma_allocation_size() as u64,
-        "has_produce_done_fd": has_produce_done_fd,
-        "has_consume_done_fd": has_consume_done_fd,
+        SURFACE_REPLY_HAS_PRODUCE_DONE_FD: has_produce_done_fd,
+        SURFACE_REPLY_HAS_CONSUME_DONE_FD: has_consume_done_fd,
         // The producer's declared `VkImageLayout`: the layout the texture
         // lives in immediately after registration, fed to host consumers as
         // the source layout of their first QFOT acquire barrier. Encoded as

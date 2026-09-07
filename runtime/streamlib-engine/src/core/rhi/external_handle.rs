@@ -69,6 +69,16 @@ impl RhiExternalHandle {
             _ => None,
         }
     }
+
+    /// The plane size the exporter stated for this fd (Linux only).
+    #[cfg(target_os = "linux")]
+    pub fn stated_size(&self) -> usize {
+        match self {
+            RhiExternalHandle::DmaBuf { size, .. } | RhiExternalHandle::OpaqueFd { size, .. } => {
+                *size
+            }
+        }
+    }
 }
 
 /// Extension trait for exporting PixelBuffer to external handle.
@@ -166,20 +176,18 @@ impl RhiPixelBufferImport for super::PixelBuffer {
         // Adopted before anything is validated, so a refusal closes every
         // fd rather than only the ones a loop reached.
         let mut plane_fds: Vec<OwnedFd> = Vec::with_capacity(handles.len());
-        let mut stated_plane_sizes: Vec<usize> = Vec::with_capacity(handles.len());
-        let mut an_opaque_fd_plane = false;
+        let mut handles_include_an_opaque_fd_plane = false;
         for handle in handles {
-            let (fd, size) = match *handle {
-                RhiExternalHandle::DmaBuf { fd, size } => (fd, size),
-                RhiExternalHandle::OpaqueFd { fd, size } => {
-                    an_opaque_fd_plane = true;
-                    (fd, size)
+            let fd = match *handle {
+                RhiExternalHandle::DmaBuf { fd, .. } => fd,
+                RhiExternalHandle::OpaqueFd { fd, .. } => {
+                    handles_include_an_opaque_fd_plane = true;
+                    fd
                 }
             };
             // SAFETY: the caller surrendered this fd to the import and holds
             // no other owner of it.
             plane_fds.push(unsafe { OwnedFd::from_raw_fd(fd) });
-            stated_plane_sizes.push(size);
         }
 
         if plane_fds.is_empty() {
@@ -191,7 +199,7 @@ impl RhiPixelBufferImport for super::PixelBuffer {
         // OPAQUE_FD is refused before the global Vulkan device or the
         // pixel-format machinery is touched, so the contract is
         // unit-testable without a live `HostVulkanDevice`.
-        if an_opaque_fd_plane {
+        if handles_include_an_opaque_fd_plane {
             return Err(crate::core::Error::NotSupported(
                 "RhiPixelBufferImport::from_external_plane_handles: \
                  OPAQUE_FD handles must be imported via \
@@ -218,9 +226,9 @@ impl RhiPixelBufferImport for super::PixelBuffer {
             ));
         }
 
-        let mut plane_sizes: Vec<vulkanalia::vk::DeviceSize> =
-            Vec::with_capacity(stated_plane_sizes.len());
-        for (idx, size) in stated_plane_sizes.into_iter().enumerate() {
+        let mut plane_sizes: Vec<vulkanalia::vk::DeviceSize> = Vec::with_capacity(handles.len());
+        for (idx, handle) in handles.iter().enumerate() {
+            let size = handle.stated_size();
             let effective = if size > 0 {
                 size as vulkanalia::vk::DeviceSize
             } else if idx == 0 && width > 0 && height > 0 {
