@@ -69,6 +69,16 @@ impl RhiExternalHandle {
             _ => None,
         }
     }
+
+    /// The plane size the exporter stated for this fd (Linux only).
+    #[cfg(target_os = "linux")]
+    pub fn stated_size(&self) -> usize {
+        match self {
+            RhiExternalHandle::DmaBuf { size, .. } | RhiExternalHandle::OpaqueFd { size, .. } => {
+                *size
+            }
+        }
+    }
 }
 
 /// Extension trait for exporting PixelBuffer to external handle.
@@ -101,13 +111,18 @@ pub trait RhiPixelBufferImport {
 
     /// Import a multi-plane GPU buffer from one external handle per plane.
     ///
+    /// Takes the handles by value because on Linux the fd inside each one
+    /// is consumed: handed to the driver at its import or closed before
+    /// that, so the caller holds nothing after the call whatever its
+    /// outcome.
+    ///
     /// The default implementation only accepts a single-plane input —
     /// backends that can't natively represent multiple planes still
     /// compile and refuse multi-plane input at runtime. Linux overrides
     /// with a real multi-plane import so the Rust surface-store path
     /// keeps feature parity with the polyglot Python and Deno shims.
     fn from_external_plane_handles(
-        handles: &[RhiExternalHandle],
+        handles: Vec<RhiExternalHandle>,
         width: u32,
         height: u32,
         format: super::PixelFormat,
@@ -115,9 +130,10 @@ pub trait RhiPixelBufferImport {
     where
         Self: Sized,
     {
-        match handles {
-            [only] => Self::from_external_handle(only.clone(), width, height, format),
-            [] => Err(crate::core::Error::Configuration(
+        let mut handles = handles.into_iter();
+        match (handles.next(), handles.next()) {
+            (Some(only), None) => Self::from_external_handle(only, width, height, format),
+            (None, _) => Err(crate::core::Error::Configuration(
                 "from_external_plane_handles: empty plane vec".into(),
             )),
             _ => Err(crate::core::Error::NotSupported(
@@ -147,34 +163,52 @@ impl RhiPixelBufferImport for super::PixelBuffer {
         height: u32,
         format: super::PixelFormat,
     ) -> Result<Self> {
-        Self::from_external_plane_handles(&[handle], width, height, format)
+        Self::from_external_plane_handles(vec![handle], width, height, format)
     }
 
+    /// Import one DMA-BUF fd per plane; see the trait for the fd contract.
     fn from_external_plane_handles(
-        handles: &[RhiExternalHandle],
+        handles: Vec<RhiExternalHandle>,
         width: u32,
         height: u32,
         format: super::PixelFormat,
     ) -> Result<Self> {
-        if handles.is_empty() {
+        use std::os::fd::{FromRawFd as _, OwnedFd};
+
+        // Adopted before anything is validated, so a refusal closes every
+        // fd rather than only the ones a loop reached.
+        let mut plane_fds: Vec<OwnedFd> = Vec::with_capacity(handles.len());
+        let mut handles_include_an_opaque_fd_plane = false;
+        for handle in &handles {
+            let fd = match *handle {
+                RhiExternalHandle::DmaBuf { fd, .. } => fd,
+                RhiExternalHandle::OpaqueFd { fd, .. } => {
+                    handles_include_an_opaque_fd_plane = true;
+                    fd
+                }
+            };
+            // SAFETY: the caller surrendered this fd to the import and holds
+            // no other owner of it.
+            plane_fds.push(unsafe { OwnedFd::from_raw_fd(fd) });
+        }
+
+        if plane_fds.is_empty() {
             return Err(crate::core::Error::Configuration(
                 "DMA-BUF import: empty plane vec".into(),
             ));
         }
 
-        // Reject any non-DMA-BUF handle types up front, before we touch the
-        // global Vulkan device or pixel-format machinery — so the contract
-        // is unit-testable without a live `HostVulkanDevice`.
-        for h in handles {
-            if let RhiExternalHandle::OpaqueFd { .. } = h {
-                return Err(crate::core::Error::NotSupported(
-                    "RhiPixelBufferImport::from_external_plane_handles: \
-                     OPAQUE_FD handles must be imported via \
-                     ConsumerVulkanBuffer::from_opaque_fd, not \
-                     this host-side DMA-BUF constructor"
-                        .into(),
-                ));
-            }
+        // OPAQUE_FD is refused before the global Vulkan device or the
+        // pixel-format machinery is touched, so the contract is
+        // unit-testable without a live `HostVulkanDevice`.
+        if handles_include_an_opaque_fd_plane {
+            return Err(crate::core::Error::NotSupported(
+                "RhiPixelBufferImport::from_external_plane_handles: \
+                 OPAQUE_FD handles must be imported via \
+                 ConsumerVulkanBuffer::from_opaque_fd, not \
+                 this host-side DMA-BUF constructor"
+                    .into(),
+            ));
         }
 
         let vulkan_device =
@@ -194,21 +228,9 @@ impl RhiPixelBufferImport for super::PixelBuffer {
             ));
         }
 
-        // Unpack every plane's fd + size. OPAQUE_FD has already been
-        // rejected above; only `DmaBuf` reaches this loop on Linux.
-        let mut fds: Vec<std::os::unix::io::RawFd> = Vec::with_capacity(handles.len());
         let mut plane_sizes: Vec<vulkanalia::vk::DeviceSize> = Vec::with_capacity(handles.len());
-        for (idx, h) in handles.iter().enumerate() {
-            let (fd, size) = match h.clone() {
-                RhiExternalHandle::DmaBuf { fd, size } => (fd, size),
-                // Unreachable: rejected up-front above; kept for
-                // exhaustiveness so future variants force a compile error.
-                RhiExternalHandle::OpaqueFd { .. } => unreachable!(
-                    "OPAQUE_FD handle should have been rejected by the up-front \
-                     handle-type validation"
-                ),
-            };
-            fds.push(fd);
+        for (idx, handle) in handles.iter().enumerate() {
+            let size = handle.stated_size();
             let effective = if size > 0 {
                 size as vulkanalia::vk::DeviceSize
             } else if idx == 0 && width > 0 && height > 0 {
@@ -226,7 +248,7 @@ impl RhiPixelBufferImport for super::PixelBuffer {
 
         let vulkan_buffer = crate::vulkan::rhi::HostVulkanBuffer::from_dma_buf_fds(
             vulkan_device,
-            &fds,
+            plane_fds,
             &plane_sizes,
         )?;
 
@@ -266,17 +288,72 @@ mod tests {
         assert!(s.contains("size: 128"), "got: {s}");
     }
 
+    /// A pipe stands in for a plane fd: each pipe has its own inode, and
+    /// holding the write end keeps that inode alive after the read end
+    /// closes, so "was it closed?" is answered without racing a parallel
+    /// test thread for the recycled number.
+    struct PlaneFdUnderTest {
+        plane_fd: std::os::unix::io::RawFd,
+        write_end_fd: std::os::unix::io::RawFd,
+        inode: u64,
+    }
+
+    fn inode_of(fd: std::os::unix::io::RawFd) -> Option<u64> {
+        let mut file_status = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(fd, file_status.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        Some(unsafe { file_status.assume_init() }.st_ino as u64)
+    }
+
+    impl PlaneFdUnderTest {
+        fn mint() -> Self {
+            let mut pipe_ends = [0 as std::os::unix::io::RawFd; 2];
+            assert_eq!(unsafe { libc::pipe(pipe_ends.as_mut_ptr()) }, 0);
+            let inode = inode_of(pipe_ends[0]).expect("a fresh pipe must stat");
+            Self {
+                plane_fd: pipe_ends[0],
+                write_end_fd: pipe_ends[1],
+                inode,
+            }
+        }
+
+        fn was_closed(&self) -> bool {
+            inode_of(self.plane_fd) != Some(self.inode)
+        }
+    }
+
+    impl Drop for PlaneFdUnderTest {
+        fn drop(&mut self) {
+            unsafe {
+                if !self.was_closed() {
+                    libc::close(self.plane_fd);
+                }
+                libc::close(self.write_end_fd);
+            }
+        }
+    }
+
+    /// OPAQUE_FD takes a different path (`ConsumerVulkanBuffer::from_opaque_fd`)
+    /// and is refused up-front rather than miscoerced through the DMA-BUF
+    /// import — and the refusal owns what it was handed: every plane fd,
+    /// the DMA-BUF one included, is closed rather than left to no one.
     #[test]
-    fn host_side_dma_buf_constructor_rejects_opaque_fd_handles() {
-        // Contract: `RhiPixelBufferImport::from_external_plane_handles`
-        // builds a `HostVulkanBuffer` from DMA-BUF FDs only. OPAQUE_FD
-        // handles take a different path (`ConsumerVulkanBuffer::from_opaque_fd`)
-        // and must be rejected up-front with a clear error rather than
-        // silently miscoercing through the DMA-BUF code path.
-        let opaque = RhiExternalHandle::OpaqueFd { fd: -1, size: 0 };
+    fn a_refused_opaque_fd_import_closes_every_plane_fd_it_was_handed() {
+        let dma_buf_plane = PlaneFdUnderTest::mint();
+        let opaque_plane = PlaneFdUnderTest::mint();
         let result =
             <super::super::PixelBuffer as RhiPixelBufferImport>::from_external_plane_handles(
-                &[opaque],
+                vec![
+                    RhiExternalHandle::DmaBuf {
+                        fd: dma_buf_plane.plane_fd,
+                        size: 4096,
+                    },
+                    RhiExternalHandle::OpaqueFd {
+                        fd: opaque_plane.plane_fd,
+                        size: 4096,
+                    },
+                ],
                 1,
                 1,
                 super::super::PixelFormat::Bgra32,
@@ -294,5 +371,13 @@ mod tests {
             }
             other => panic!("expected NotSupported, got: {other:?}"),
         }
+        assert!(
+            dma_buf_plane.was_closed(),
+            "the refusal left the DMA-BUF plane fd open — no owner remains to close it"
+        );
+        assert!(
+            opaque_plane.was_closed(),
+            "the refusal left the OPAQUE_FD plane fd open — no owner remains to close it"
+        );
     }
 }

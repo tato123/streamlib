@@ -9,6 +9,7 @@
 //! it, transparent CPU-upload (MMAP + memcpy) fallback otherwise, selected
 //! automatically — no configuration dial.
 
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -648,13 +649,6 @@ fn capture_thread_loop(
         let mut use_dmabuf = false;
         let mut dmabuf_imported_buffers: Vec<StorageBuffer> = Vec::new();
         if caps.supports_external_memory && !is_virtual_device && !probe_skipped {
-            // Fd ownership: `import_dma_buf_storage_buffer` consumes the fd
-            // on success (`vkImportMemoryFdInfoKHR` transfers it to the
-            // driver, which closes it at free); on failure the fd stays ours
-            // and is closed here. Successfully imported fds are never closed
-            // by this code. Buffers already imported when a later index
-            // fails are dropped with the Vec, freeing their memory (and fd)
-            // through Vulkan.
             let mut imported: Vec<StorageBuffer> = Vec::with_capacity(V4L2_BUFFER_COUNT as usize);
             for i in 0..V4L2_BUFFER_COUNT as usize {
                 let fd: i32 = unsafe {
@@ -678,7 +672,10 @@ fn capture_thread_loop(
                     }
                     break;
                 }
-                match full.import_dma_buf_storage_buffer(fd, input_alloc_size) {
+                // SAFETY: VIDIOC_EXPBUF minted this fd for us and nothing
+                // else holds it; the import owns it from here.
+                let dma_buf_fd = unsafe { OwnedFd::from_raw_fd(fd) };
+                match full.import_dma_buf_storage_buffer(dma_buf_fd, input_alloc_size) {
                     Ok(imported_buffer) => imported.push(imported_buffer),
                     Err(e) => {
                         if i == 0 {
@@ -700,7 +697,6 @@ fn capture_thread_loop(
                                 );
                             }
                         }
-                        unsafe { libc::close(fd) };
                         break;
                     }
                 }

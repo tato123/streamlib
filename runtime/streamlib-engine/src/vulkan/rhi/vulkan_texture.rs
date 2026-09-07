@@ -1345,7 +1345,7 @@ impl HostVulkanTexture {
     /// The host allocated the image via [`Self::new_render_target_dma_buf`]
     /// with a tiled DRM modifier (LINEAR is sampler-only on NVIDIA). The
     /// subprocess receives:
-    /// - `fds` — DMA-BUF file descriptors, one per plane.
+    /// - `plane_fds` — DMA-BUF file descriptors, one per plane.
     /// - `plane_offsets` / `plane_strides` — exact layout the host's
     ///   `vkGetImageSubresourceLayout` reported.
     /// - `drm_format_modifier` — the modifier the host's driver chose;
@@ -1358,12 +1358,13 @@ impl HostVulkanTexture {
     /// allocation; same modifier on both sides keeps the GPU memory
     /// layout consistent.
     ///
-    /// fd ownership: the subprocess transfers ownership to Vulkan on
-    /// success (the driver `dup`s internally and releases on
-    /// `vkFreeMemory`). On error the caller still owns `fds[0]`.
+    /// Consumes every plane fd: plane 0 is handed to the driver at
+    /// `vkAllocateMemory`, whatever that call returns (see
+    /// [`HostVulkanDevice::import_dma_buf_memory`]), and the rest close
+    /// here — multi-plane binding is not wired yet.
     pub fn import_render_target_dma_buf(
         vulkan_device: &Arc<HostVulkanDevice>,
-        fds: &[std::os::unix::io::RawFd],
+        plane_fds: Vec<std::os::fd::OwnedFd>,
         plane_offsets: &[u64],
         plane_strides: &[u64],
         drm_format_modifier: u64,
@@ -1372,15 +1373,15 @@ impl HostVulkanTexture {
         format: TextureFormat,
         allocation_size: vk::DeviceSize,
     ) -> Result<Self> {
-        if fds.is_empty() {
+        if plane_fds.is_empty() {
             return Err(Error::GpuError(
                 "import_render_target_dma_buf: empty fd vec".into(),
             ));
         }
-        if plane_offsets.len() != fds.len() || plane_strides.len() != fds.len() {
+        if plane_offsets.len() != plane_fds.len() || plane_strides.len() != plane_fds.len() {
             return Err(Error::GpuError(format!(
                 "import_render_target_dma_buf: plane arrays length mismatch — fds={} offsets={} strides={}",
-                fds.len(),
+                plane_fds.len(),
                 plane_offsets.len(),
                 plane_strides.len()
             )));
@@ -1463,9 +1464,12 @@ impl HostVulkanTexture {
         // VkBindImagePlaneMemoryInfo, which we'll wire when a multi-plane
         // consumer surfaces. Single-plane covers BGRA / RGBA — the
         // formats #510 publishes RT modifiers for today.
+        let mut plane_fds = plane_fds.into_iter();
+        let plane_0_fd = plane_fds.next().expect("checked non-empty above");
+        drop(plane_fds);
         let memory = vulkan_device
             .import_dma_buf_memory(
-                fds[0],
+                plane_0_fd,
                 alloc_size,
                 mem_requirements.memory_type_bits,
                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
@@ -1505,9 +1509,15 @@ impl HostVulkanTexture {
     }
 
     /// Import a texture from a DMA-BUF file descriptor.
+    ///
+    /// Takes the fd by value because the caller holds nothing after this
+    /// returns: the fd is handed to the driver at `vkAllocateMemory` — the
+    /// driver's from then on, whatever that call returned (see
+    /// [`HostVulkanDevice::import_dma_buf_memory`]) — or closed here on an
+    /// exit before that point.
     pub fn from_dma_buf_fd(
         vulkan_device: &Arc<HostVulkanDevice>,
-        fd: std::os::unix::io::RawFd,
+        dma_buf_fd: std::os::fd::OwnedFd,
         width: u32,
         height: u32,
         format: TextureFormat,
@@ -1548,7 +1558,7 @@ impl HostVulkanTexture {
         // VMA cannot import external memory — use raw import path in the RHI
         let memory = vulkan_device
             .import_dma_buf_memory(
-                fd,
+                dma_buf_fd,
                 alloc_size,
                 mem_requirements.memory_type_bits,
                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
@@ -1729,6 +1739,71 @@ impl super::VulkanTextureLike for HostVulkanTexture {
 mod tests {
     use super::*;
     use crate::vulkan::rhi::HostVulkanDevice;
+
+    #[cfg(target_os = "linux")]
+    fn inode_of(fd: std::os::unix::io::RawFd) -> Option<u64> {
+        let mut file_status = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(fd, file_status.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        Some(unsafe { file_status.assume_init() }.st_ino as u64)
+    }
+
+    /// The device-side half of the lookup's fd contract. A 4 KB buffer's
+    /// DMA-BUF cannot back a 16 MB image allocation, so the driver refuses
+    /// at `vkAllocateMemory` — and closes the fd as it does (NVIDIA), which
+    /// is why the importer must not close it again: in a debug build a
+    /// second close of an `OwnedFd` is an IO-safety abort of this very
+    /// test binary. Nothing may be left open, and nothing closed twice.
+    #[cfg(target_os = "linux")]
+    #[cfg_attr(
+        not(feature = "hardware-tests"),
+        ignore = "hardware integration — set --features streamlib/hardware-tests + run with --test-threads=1. See docs/testing-hardware.md"
+    )]
+    #[test]
+    fn a_texture_import_the_driver_refuses_leaves_no_fd_behind_and_closes_none_twice() {
+        use std::os::fd::{FromRawFd as _, OwnedFd};
+
+        let device = match HostVulkanDevice::new() {
+            Ok(d) => d,
+            Err(_) => {
+                println!("Skipping - no Vulkan device available");
+                return;
+            }
+        };
+
+        let source =
+            crate::vulkan::rhi::HostVulkanBuffer::new_storage_buffer_host_visible(&device, 4096)
+                .expect("source buffer allocation failed");
+        let fd = source.export_dma_buf_fd().expect("DMA-BUF export failed");
+        let inode = inode_of(fd).expect("an exported DMA-BUF must stat");
+
+        let live_imports_before = device.live_import_allocation_count();
+        let result = HostVulkanTexture::from_dma_buf_fd(
+            &device,
+            unsafe { OwnedFd::from_raw_fd(fd) },
+            64,
+            64,
+            TextureFormat::Rgba8Unorm,
+            16 * 1024 * 1024,
+        );
+        assert!(
+            result.is_err(),
+            "a 4 KB DMA-BUF cannot back a 16 MB image; the driver accepted it and the \
+             close-on-failure contract went unexercised"
+        );
+        drop(result);
+        assert_eq!(
+            device.live_import_allocation_count(),
+            live_imports_before,
+            "a refused import must not leave VkDeviceMemory live"
+        );
+        assert_ne!(
+            inode_of(fd),
+            Some(inode),
+            "the refused import left the DMA-BUF fd open — no owner remains to close it"
+        );
+    }
     #[cfg(target_os = "linux")]
     use crate::vulkan::rhi::video_profile_test_fixture::{
         VideoProfileWithOwnedCodecExtensionChain, device_supports_h264_for_dpb_direction,

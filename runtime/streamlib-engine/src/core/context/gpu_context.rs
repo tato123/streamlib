@@ -2377,18 +2377,18 @@ impl GpuContext {
     }
 
     /// Import a DMA-BUF FD as a `StorageBuffer`. Camera V4L2 zero-copy
-    /// path. **Consumes `fd` on success** (`vkImportMemoryFdInfoKHR`
-    /// takes ownership); on failure caller retains fd and must close.
+    /// path. Consumes `dma_buf_fd` whatever the outcome: the driver owns
+    /// it behind a successful import and a failure closes it.
     #[cfg(target_os = "linux")]
     pub fn import_dma_buf_storage_buffer(
         &self,
-        fd: std::os::unix::io::RawFd,
+        dma_buf_fd: std::os::fd::OwnedFd,
         byte_size: u64,
     ) -> Result<crate::core::rhi::StorageBuffer> {
         let vulkan_device = &self.device.inner;
         let buf = crate::vulkan::rhi::HostVulkanBuffer::from_dma_buf_fd_as_storage_buffer(
             vulkan_device,
-            fd,
+            dma_buf_fd,
             byte_size,
         )?;
         Ok(crate::core::rhi::StorageBuffer::from_host_vulkan_buffer(
@@ -4573,19 +4573,17 @@ impl GpuContextFullAccess {
         self.host_inner().supports_ray_tracing_pipeline()
     }
 
-    /// Import a DMA-BUF FD as a `StorageBuffer` handle. Camera
-    /// V4L2 zero-copy path. **Consumes `fd` on success** — on success
-    /// the host's `vkImportMemoryFdInfoKHR` takes ownership of the
-    /// kernel-side fd transfer; on failure the caller retains the fd
-    /// and must close it.
+    /// Import a DMA-BUF FD as a `StorageBuffer` handle. Camera V4L2
+    /// zero-copy path. Consumes `dma_buf_fd` whatever the outcome: the
+    /// driver owns it behind a successful import and a failure closes it.
     #[cfg(target_os = "linux")]
     pub fn import_dma_buf_storage_buffer(
         &self,
-        fd: std::os::unix::io::RawFd,
+        dma_buf_fd: std::os::fd::OwnedFd,
         byte_size: u64,
     ) -> Result<crate::core::rhi::StorageBuffer> {
         self.host_inner()
-            .import_dma_buf_storage_buffer(fd, byte_size)
+            .import_dma_buf_storage_buffer(dma_buf_fd, byte_size)
     }
 
     /// Export a fresh dup'd DMA-BUF FD + byte size for a `PixelBuffer`.
