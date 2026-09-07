@@ -644,7 +644,7 @@ mod router_surface_and_auth_gate_tests {
     /// reach one, so a route that regrows here fails loudly instead of quietly
     /// succeeding against a permissive stub.
     #[derive(Default)]
-    pub(super) struct ControlPlaneRouterStubRuntime {
+    struct ControlPlaneRouterStubRuntime {
         recorded_shutdown_reasons: Arc<Mutex<Vec<String>>>,
         exchange: StubSurfaceExchange,
     }
@@ -696,7 +696,7 @@ mod router_surface_and_auth_gate_tests {
     }
 
     /// Router in the default (auth-off) mode — every route is open with no token.
-    fn auth_disabled_router() -> Router {
+    pub(super) fn auth_disabled_router() -> Router {
         build_router(Arc::new(ControlPlaneRouterStubRuntime::default()), None)
     }
 
@@ -1181,19 +1181,13 @@ mod router_surface_and_auth_gate_tests {
 
 #[cfg(test)]
 mod control_plane_request_trace_level_tests {
-    //! What a routine control-plane request says at the app's log filter.
+    //! The log level a routine control-plane request speaks at.
     //!
-    //! A node hosts this control plane for the whole run, so a client polling it
-    //! writes a line per request into the same stdout and JSONL the app's own
-    //! processors write to. At the engine's default `info` filter that traffic
-    //! must be silent — an app's log belongs to the app. The trace itself is not
-    //! deleted, only levelled: `RUST_LOG=tower_http=debug` brings the records
-    //! back with their span fields.
-    //!
-    //! Both tests drive the real [`build_router`] through a real `EnvFilter`;
-    //! only the `RuntimeOperations` backend is a stub.
+    //! At the engine's default `info` filter a node's control plane adds
+    //! nothing to the app's own log. The trace is levelled, not deleted, so
+    //! `RUST_LOG=tower_http=debug` brings all three records back.
 
-    use super::router_surface_and_auth_gate_tests::ControlPlaneRouterStubRuntime;
+    use super::router_surface_and_auth_gate_tests::auth_disabled_router;
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
@@ -1204,12 +1198,27 @@ mod control_plane_request_trace_level_tests {
     /// The `target` of every tracing span and event raised while this is the
     /// calling thread's default subscriber.
     ///
-    /// Targets rather than messages: `tower_http` names its trace records by
-    /// module path, so the target alone says which of the three hooks fired.
     /// Spans are recorded alongside events because the request span is the
-    /// third hook the layer levels, and it raises no event of its own.
+    /// third hook the trace layer levels, and it raises no event of its own.
     #[derive(Clone, Default)]
-    struct CapturedTracingSpanAndEventTargets(Arc<Mutex<Vec<String>>>);
+    struct CapturedTracingSpanAndEventTargets {
+        recorded_targets: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CapturedTracingSpanAndEventTargets {
+        fn forget_everything_captured_so_far(&self) {
+            self.recorded_targets.lock().clear();
+        }
+
+        fn tower_http_trace_targets(&self) -> Vec<String> {
+            self.recorded_targets
+                .lock()
+                .iter()
+                .filter(|target| target.starts_with("tower_http"))
+                .cloned()
+                .collect()
+        }
+    }
 
     impl<S: tracing::Subscriber> Layer<S> for CapturedTracingSpanAndEventTargets {
         fn on_new_span(
@@ -1218,19 +1227,20 @@ mod control_plane_request_trace_level_tests {
             _id: &tracing::span::Id,
             _context: Context<'_, S>,
         ) {
-            self.0.lock().push(span.metadata().target().to_string());
+            self.recorded_targets
+                .lock()
+                .push(span.metadata().target().to_string());
         }
 
         fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, S>) {
-            self.0.lock().push(event.metadata().target().to_string());
+            self.recorded_targets
+                .lock()
+                .push(event.metadata().target().to_string());
         }
     }
 
-    /// Serve one `GET /api/graph` through the real [`build_router`] — the verb
-    /// the ticket's repro loops.
     async fn serve_one_graph_request() {
-        let router = build_router(Arc::new(ControlPlaneRouterStubRuntime::default()), None);
-        let response = router
+        let response = auth_disabled_router()
             .oneshot(
                 Request::builder()
                     .uri("/api/graph")
@@ -1242,31 +1252,26 @@ mod control_plane_request_trace_level_tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    /// The `tower_http` records one graph request reaches a `filter`-filtered
-    /// subscriber with.
+    /// The `tower_http` trace targets one graph request raises under
+    /// `env_filter_directives`.
     ///
-    /// `registry + EnvFilter + one recording layer` is the shape the engine
-    /// installs for an app, so what this captures is what that app's stdout and
-    /// JSONL would carry. The subscriber is thread-local and the runtime is
-    /// current-thread, so the request is served on the thread the capture is
-    /// installed on.
+    /// `registry + EnvFilter + one recording layer` is the subscriber the
+    /// engine installs for an app, so what this captures is what that app's
+    /// stdout and JSONL would carry.
     ///
     /// Two requests, because `tracing` caches each callsite's `Interest`
-    /// globally — computed once, from whichever thread first reaches it. Every
-    /// other test in this binary serves requests with no subscriber installed,
-    /// so whichever of them touches one of these three callsites first would
-    /// cache `never` for the exact records under test. The first request
-    /// registers the callsites, `rebuild_interest_cache` recomputes them
-    /// against this thread's filter, and the second request is the one measured.
-    ///
-    /// That rebuild also republishes the process-global max level, which is why
-    /// its two callers are `#[serial]`: the `info` test running alongside the
-    /// `debug` one would pin the ceiling at INFO and hide the records the other
-    /// asserts on.
-    fn tower_http_records_from_one_graph_request(filter: &str) -> Vec<String> {
+    /// process-globally, computed once from whichever thread first reaches it —
+    /// and every other test in this binary serves requests with no subscriber
+    /// installed, so whichever of them touches one of these three callsites
+    /// first caches `never` for the exact records under test. The first request
+    /// registers them, `rebuild_interest_cache` recomputes them against this
+    /// thread's filter, and the second request is the one measured. Both
+    /// callers are `#[serial]` because that rebuild rewrites process-global
+    /// state, not because a specific interleaving is known to bite.
+    fn tower_http_trace_targets_from_one_graph_request(env_filter_directives: &str) -> Vec<String> {
         let captured = CapturedTracingSpanAndEventTargets::default();
         let subscriber = tracing_subscriber::registry()
-            .with(tracing_subscriber::EnvFilter::new(filter))
+            .with(tracing_subscriber::EnvFilter::new(env_filter_directives))
             .with(captured.clone());
 
         tracing::subscriber::with_default(subscriber, || {
@@ -1277,42 +1282,36 @@ mod control_plane_request_trace_level_tests {
             request_runtime.block_on(async {
                 serve_one_graph_request().await;
                 tracing::callsite::rebuild_interest_cache();
-                captured.0.lock().clear();
+                captured.forget_everything_captured_so_far();
                 serve_one_graph_request().await;
             });
         });
 
-        let targets = captured.0.lock().clone();
-        targets
-            .into_iter()
-            .filter(|target| target.starts_with("tower_http"))
-            .collect()
+        captured.tower_http_trace_targets()
     }
 
-    /// The bug: a client polling the node drowned the app's own log.
     #[test]
     #[serial]
     fn a_routine_request_says_nothing_at_the_default_info_filter() {
-        let records = tower_http_records_from_one_graph_request("info");
+        let targets = tower_http_trace_targets_from_one_graph_request("info");
         assert!(
-            records.is_empty(),
-            "a request must be silent at the engine's default filter, got: {records:?}"
+            targets.is_empty(),
+            "a request must be silent at the engine's default filter, got: {targets:?}"
         );
     }
 
-    /// And the trace is still there for whoever asks for it.
     #[test]
     #[serial]
     fn the_same_request_traces_all_three_hooks_under_tower_http_debug() {
-        let records = tower_http_records_from_one_graph_request("info,tower_http=debug");
+        let targets = tower_http_trace_targets_from_one_graph_request("info,tower_http=debug");
         for hook in [
             "tower_http::trace::make_span",
             "tower_http::trace::on_request",
             "tower_http::trace::on_response",
         ] {
             assert!(
-                records.iter().any(|target| target == hook),
-                "asking for the request trace must yield {hook}, got: {records:?}"
+                targets.iter().any(|target| target == hook),
+                "asking for the request trace must yield {hook}, got: {targets:?}"
             );
         }
     }
