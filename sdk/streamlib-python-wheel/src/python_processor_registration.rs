@@ -110,6 +110,43 @@ pub(crate) fn register_processor_class(
     Ok(identity)
 }
 
+/// Register the class `processor_class_import_path` names by importing it into
+/// this interpreter — the registration import `rt.add` performs, done for a
+/// caller that holds only the path, such as an `add_processor` over the control
+/// plane. The processor itself still runs in its own helper process.
+///
+/// A path in another grammar — a Rust `crate::module::Type`, or one with no
+/// module at all — names nothing this interpreter could import, so it is left
+/// untouched for the registry to report as unknown.
+pub(crate) fn register_processor_class_by_import_path(
+    python: Python<'_>,
+    processor_class_import_path: &ProcessorClassImportPath,
+) -> PyResult<()> {
+    let path = processor_class_import_path.as_str();
+    let Some((module_name, qualname)) = path.split_once(':') else {
+        return Ok(());
+    };
+    if path.contains("::") || module_name.is_empty() || qualname.is_empty() {
+        return Ok(());
+    }
+    let importlib = python.import("importlib")?;
+    // A module written to disk after this interpreter started is invisible to
+    // the import system's directory caches until they are invalidated.
+    importlib.call_method0("invalidate_caches")?;
+    let mut processor_class = importlib.call_method1("import_module", (module_name,))?;
+    for attribute in qualname.split('.') {
+        processor_class = processor_class.getattr(attribute)?;
+    }
+    let registered = register_processor_class(python, &processor_class)?;
+    if registered != *processor_class_import_path {
+        return Err(PyValueError::new_err(format!(
+            "`{path}` resolved to a class identifying as `{}`; add it by that path",
+            registered.as_str()
+        )));
+    }
+    Ok(())
+}
+
 fn class_qualified_name(processor_class: &Bound<'_, PyAny>) -> String {
     let module = processor_class
         .getattr("__module__")

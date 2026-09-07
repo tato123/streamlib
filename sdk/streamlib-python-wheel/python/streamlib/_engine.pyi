@@ -584,6 +584,15 @@ class ProcessorLinkDataAccess:
     """
 
     def __new__(cls) -> ProcessorLinkDataAccess: ...
+    def declare_ports(
+        self, input_port_names: Sequence[str], output_port_names: Sequence[str]
+    ) -> None:
+        """Name the class's ports ahead of any wiring.
+
+        A declared port no link has reached reads as empty and drops what is
+        written to it; only an undeclared name is refused.
+        """
+
     def wire_output_link(
         self,
         port_name: str,

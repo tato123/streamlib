@@ -88,6 +88,118 @@ macro_rules! graph_mutation_ops_are_unreachable {
 
 pub(crate) use graph_mutation_ops_are_unreachable;
 
+/// One graph mutation a front-end stub saw, with the arguments it was handed.
+#[derive(Debug)]
+pub(crate) enum RecordedGraphMutation {
+    AddProcessor(::streamlib::sdk::processors::ProcessorSpec),
+    RemoveProcessor(::streamlib::sdk::graph::ProcessorUniqueId),
+    Connect(
+        ::streamlib::sdk::graph::OutputLinkPortRef,
+        ::streamlib::sdk::graph::InputLinkPortRef,
+    ),
+    Disconnect(::streamlib::sdk::graph::LinkUniqueId),
+}
+
+/// The graph mutations a front end handed the runtime, in call order.
+pub(crate) type RecordedGraphMutations =
+    ::std::sync::Arc<::parking_lot::Mutex<Vec<RecordedGraphMutation>>>;
+
+/// The id the stub answers every `add_processor` with.
+pub(crate) const STUB_ADDED_PROCESSOR_ID: &str = "stub-added-processor";
+
+/// The id the stub answers every `connect` with.
+pub(crate) const STUB_CREATED_LINK_ID: &str = "stub-created-link";
+
+/// Implement the four async graph-mutating [`RuntimeOperations`] methods by
+/// recording the call on a `recorded_graph_mutations` field and answering a
+/// fixed id, so a front-end test can assert its tool reached the matching op
+/// with the arguments the caller sent. The blocking wrappers stay unreachable:
+/// a front end awaits, it never blocks a worker.
+macro_rules! graph_mutation_ops_record_the_call {
+    () => {
+        fn add_processor_async(
+            &self,
+            spec: ::streamlib::sdk::processors::ProcessorSpec,
+        ) -> ::streamlib::sdk::runtime::BoxFuture<
+            '_,
+            ::streamlib::sdk::error::Result<::streamlib::sdk::graph::ProcessorUniqueId>,
+        > {
+            self.recorded_graph_mutations.lock().push(
+                $crate::control_plane_stub_support::RecordedGraphMutation::AddProcessor(spec),
+            );
+            Box::pin(async {
+                Ok(::streamlib::sdk::graph::ProcessorUniqueId::from(
+                    $crate::control_plane_stub_support::STUB_ADDED_PROCESSOR_ID,
+                ))
+            })
+        }
+        fn remove_processor_async(
+            &self,
+            processor_id: ::streamlib::sdk::graph::ProcessorUniqueId,
+        ) -> ::streamlib::sdk::runtime::BoxFuture<'_, ::streamlib::sdk::error::Result<()>> {
+            self.recorded_graph_mutations.lock().push(
+                $crate::control_plane_stub_support::RecordedGraphMutation::RemoveProcessor(
+                    processor_id,
+                ),
+            );
+            Box::pin(async { Ok(()) })
+        }
+        fn connect_async(
+            &self,
+            from: ::streamlib::sdk::graph::OutputLinkPortRef,
+            to: ::streamlib::sdk::graph::InputLinkPortRef,
+        ) -> ::streamlib::sdk::runtime::BoxFuture<
+            '_,
+            ::streamlib::sdk::error::Result<::streamlib::sdk::graph::LinkUniqueId>,
+        > {
+            self.recorded_graph_mutations
+                .lock()
+                .push($crate::control_plane_stub_support::RecordedGraphMutation::Connect(from, to));
+            Box::pin(async {
+                Ok(::streamlib::sdk::graph::LinkUniqueId::from(
+                    $crate::control_plane_stub_support::STUB_CREATED_LINK_ID,
+                ))
+            })
+        }
+        fn disconnect_async(
+            &self,
+            link_id: ::streamlib::sdk::graph::LinkUniqueId,
+        ) -> ::streamlib::sdk::runtime::BoxFuture<'_, ::streamlib::sdk::error::Result<()>> {
+            self.recorded_graph_mutations.lock().push(
+                $crate::control_plane_stub_support::RecordedGraphMutation::Disconnect(link_id),
+            );
+            Box::pin(async { Ok(()) })
+        }
+        fn add_processor(
+            &self,
+            _spec: ::streamlib::sdk::processors::ProcessorSpec,
+        ) -> ::streamlib::sdk::error::Result<::streamlib::sdk::graph::ProcessorUniqueId> {
+            unreachable!("the MCP front end awaits the async op, never the blocking wrapper")
+        }
+        fn remove_processor(
+            &self,
+            _processor_id: &::streamlib::sdk::graph::ProcessorUniqueId,
+        ) -> ::streamlib::sdk::error::Result<()> {
+            unreachable!("the MCP front end awaits the async op, never the blocking wrapper")
+        }
+        fn connect(
+            &self,
+            _from: ::streamlib::sdk::graph::OutputLinkPortRef,
+            _to: ::streamlib::sdk::graph::InputLinkPortRef,
+        ) -> ::streamlib::sdk::error::Result<::streamlib::sdk::graph::LinkUniqueId> {
+            unreachable!("the MCP front end awaits the async op, never the blocking wrapper")
+        }
+        fn disconnect(
+            &self,
+            _link_id: &::streamlib::sdk::graph::LinkUniqueId,
+        ) -> ::streamlib::sdk::error::Result<()> {
+            unreachable!("the MCP front end awaits the async op, never the blocking wrapper")
+        }
+    };
+}
+
+pub(crate) use graph_mutation_ops_record_the_call;
+
 /// A published pool frame id is `<slot>#<generation>`, and `#` starts a URL
 /// fragment — so the wire form is percent-encoded and a front end has to
 /// hand the operation the decoded id.

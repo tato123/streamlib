@@ -365,7 +365,12 @@ impl From<&crate::core::graph::Link> for LinkOutput {
             source: LinkPortRefOutput::from(&link.source),
             target: LinkPortRefOutput::from(&link.target),
             capacity: link.capacity.get(),
-            state: LinkStateOutput::from(link.state),
+            // Wiring records its outcome on the component; the field is the
+            // state the link was created in.
+            state: link
+                .get::<crate::core::graph::LinkStateComponent>()
+                .map(|wired| LinkStateOutput::from(wired.0))
+                .unwrap_or_else(|| LinkStateOutput::from(link.state)),
             components: link.serialize_components(),
         }
     }
@@ -460,6 +465,26 @@ impl From<&crate::core::CodeExamples> for CodeExamplesOutput {
             python: examples.python.clone(),
             typescript: examples.typescript.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod link_rendering_tests {
+    use super::*;
+    use crate::core::graph::{GraphEdgeWithComponents, Link, LinkState, LinkStateComponent};
+
+    /// The field is the state a link was created in; wiring records its
+    /// outcome on a component. Rendering reads the component first, so a
+    /// `graph` read after a connect says `wired` at the top level rather than
+    /// a permanent `pending` beside a `components.state` that disagrees.
+    #[test]
+    fn a_wired_links_top_level_state_comes_from_its_wiring_component() {
+        let mut link = Link::new("Psrc.out1", "Pdst.in1");
+        let rendered = |link: &Link| serde_json::to_value(LinkOutput::from(link)).unwrap();
+        assert_eq!(rendered(&link)["state"], "pending");
+
+        link.insert(LinkStateComponent(LinkState::Wired));
+        assert_eq!(rendered(&link)["state"], "wired");
     }
 }
 

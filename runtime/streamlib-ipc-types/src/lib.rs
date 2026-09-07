@@ -249,18 +249,34 @@ pub const DEFAULT_MAX_QUEUED_MESSAGES: usize = 16;
 pub const MAX_PUBLISHERS_PER_CHANNEL: usize = 1;
 
 /// Subscriber slots reserved on every channel data service beyond its
-/// compile-time-known destination count.
+/// destination slots.
 ///
-/// A channel's data service is created with `max_subscribers = N + this`, where
-/// `N` is the number of destinations wired to the source output port at
-/// graph-compile time. The reserved slot lets the phase-3.5 `tap` op attach a
-/// broadcast consumer as a pure subscriber-add with no service re-open — iceoryx2
-/// fixes `max_subscribers` at create time, so the headroom must exist up front.
-/// iceoryx2 sizes each publisher's shared-memory data segment as
-/// `max_subscribers × (subscriber_max_buffer_size + borrowed) + …`, so this is
-/// deliberately 1 (not the iceoryx2 default of 8) to keep the per-channel segment
-/// sized to its true consumer count plus one tap.
+/// A channel's data service is created with `max_subscribers =
+/// MAX_DESTINATIONS_PER_CHANNEL + this`. The reserved slot lets the phase-3.5
+/// `tap` op attach a broadcast consumer as a pure subscriber-add with no service
+/// re-open — iceoryx2 fixes `max_subscribers` at create time, so the headroom
+/// must exist up front. iceoryx2 sizes each publisher's shared-memory data
+/// segment as `max_subscribers × (subscriber_max_buffer_size + borrowed) + …`,
+/// so this is deliberately 1 (not the iceoryx2 default of 8).
 pub const RESERVED_TAP_SUBSCRIBER_SLOTS_PER_CHANNEL: usize = 1;
+
+/// Destinations one channel — one source output port — may feed at once.
+///
+/// iceoryx2 pins `max_subscribers` when the data service is created and
+/// verifies it on every reopen, so the slot count cannot follow the graph: a
+/// link connected to a running source must fit a slot that existed when the
+/// channel opened. Every opener requests this same fixed count, and a source
+/// output port refuses a link past it by name.
+pub const MAX_DESTINATIONS_PER_CHANNEL: usize = 8;
+
+/// Inbound links one destination processor may hold at once — the
+/// `max_notifiers` its destination-keyed notify service is created with.
+///
+/// Pinned for the same reason as [`MAX_DESTINATIONS_PER_CHANNEL`]: the notify
+/// service is created with the first inbound link and iceoryx2 verifies the
+/// count on every reopen, so a link connected later must fit a notifier slot
+/// that already exists.
+pub const MAX_INBOUND_LINKS_PER_DESTINATION: usize = 8;
 
 /// Size of the frame header in the `[u8]` slice wire format.
 pub const FRAME_HEADER_SIZE: usize = MAX_PORT_KEY_SIZE + 8 + 4; // 76 bytes

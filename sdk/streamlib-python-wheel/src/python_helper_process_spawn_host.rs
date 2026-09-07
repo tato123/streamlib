@@ -634,6 +634,26 @@ impl DynGeneratedProcessor for PythonHelperProcessSpawnHostProcessor {
         }))
     }
 
+    /// Hand the child one link wired after its setup — unanswered, for the
+    /// same reasons `unwire_out_of_process_link` is.
+    ///
+    /// Before `setup` there is no bridge and nothing to send: the setup command
+    /// reads the envelope, which already carries this link.
+    fn wire_out_of_process_link(
+        &mut self,
+        port_direction: streamlib::sdk::error::PortDirection,
+        link_wiring: &serde_json::Value,
+    ) -> Result<()> {
+        if self.has_failed_unrecoverably() || self.bridge.is_none() {
+            return Ok(());
+        }
+        self.send_to_child(&serde_json::json!({
+            "cmd": "wire_link",
+            "direction": port_direction.as_wire_str(),
+            "link": link_wiring,
+        }))
+    }
+
     fn set_iceoryx2_resources(
         &mut self,
         _output_writer: Option<streamlib::sdk::iceoryx2::OutputWriter>,

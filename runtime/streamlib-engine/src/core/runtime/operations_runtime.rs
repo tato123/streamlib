@@ -4,15 +4,17 @@
 use std::sync::Arc;
 
 use super::Runner;
+use super::RuntimeStatus;
 use super::operations::{BoxFuture, RuntimeOperations};
 use super::runtime::TokioRuntimeVariant;
 use super::surface_image_exchange::exchange_published_surface_id_for_png_image_bytes;
+use crate::core::RuntimeContext;
 use crate::core::compiler::{Compiler, PendingOperation};
 use crate::core::graph::{
     GraphEdgeWithComponents, GraphNodeWithComponents, LinkUniqueId, PendingDeletionComponent,
     ProcessorUniqueId, StateComponent,
 };
-use crate::core::processors::{ProcessorSpec, ProcessorState};
+use crate::core::processors::{PROCESSOR_REGISTRY, ProcessorSpec, ProcessorState};
 use crate::core::pubsub::{Event, PUBSUB, RuntimeEvent, topics};
 use crate::core::runtime::ExchangedPublishedSurfaceFramePngImage;
 use crate::core::{Error, InputLinkPortRef, OutputLinkPortRef, PortDirection, Result};
@@ -23,6 +25,30 @@ use tracing::Instrument as _;
 // Core Implementation Functions ('static async fns for spawn compatibility)
 // =============================================================================
 
+/// The context a graph mutation compiles against the moment it is logged —
+/// `Some` once the runtime is started, `None` while the graph is still being
+/// built ahead of `start()`, which commits the whole batch itself.
+type LiveCommitContext = Option<Arc<RuntimeContext>>;
+
+/// Compile the operations a mutation just logged, so the caller learns whether
+/// its change took. A batch that fails to spawn or wire is otherwise discarded
+/// with a log line as its only trace, after the caller was already told the
+/// change was accepted. The compile blocks — it waits for a spawned processor
+/// to report ready — so it runs off the async worker.
+async fn commit_live_graph_change(compiler: &Arc<Compiler>, live: LiveCommitContext) -> Result<()> {
+    let Some(runtime_ctx) = live else {
+        return Ok(());
+    };
+    let compiler = Arc::clone(compiler);
+    tokio::task::spawn_blocking(move || compiler.commit(&runtime_ctx))
+        .await
+        .map_err(|join_failure| {
+            Error::Runtime(format!(
+                "the graph change's compile task did not finish: {join_failure}"
+            ))
+        })?
+}
+
 /// Core implementation for add_processor - takes owned Arcs for 'static lifetime.
 ///
 /// Reports the display name the graph assigned alongside the id. Both come out
@@ -31,6 +57,7 @@ use tracing::Instrument as _;
 /// into being told its own successful add does not exist.
 async fn add_processor_impl(
     compiler: Arc<Compiler>,
+    live: LiveCommitContext,
     spec: ProcessorSpec,
 ) -> Result<(ProcessorUniqueId, String)> {
     let emit_will_add = |id: &ProcessorUniqueId| {
@@ -50,6 +77,12 @@ async fn add_processor_impl(
             }),
         );
     };
+
+    // A type nobody registered may still be resolvable by name — the wheel
+    // resolves a Python class import path the way `rt.add` would. A resolver
+    // that fails names why; one that is absent leaves the registry miss below
+    // to say the type is unknown.
+    PROCESSOR_REGISTRY.resolve_processor_type_if_unregistered(&spec.name)?;
 
     // Held so a typed `UnknownProcessorType` can name what was asked for —
     // `spec` is moved into `add_v`.
@@ -90,6 +123,8 @@ async fn add_processor_impl(
         Ok((node_id, assigned_display_name))
     })?;
 
+    commit_live_graph_change(&compiler, live).await?;
+
     PUBSUB.publish(
         topics::RUNTIME_GLOBAL,
         &Event::RuntimeGlobal(RuntimeEvent::GraphDidChange),
@@ -101,11 +136,37 @@ async fn add_processor_impl(
 /// Core implementation for remove_processor - takes owned Arcs for 'static lifetime.
 async fn remove_processor_impl(
     compiler: Arc<Compiler>,
+    live: LiveCommitContext,
     processor_id: ProcessorUniqueId,
 ) -> Result<()> {
     compiler.scope(|graph, tx| {
         if !graph.traversal().v(&processor_id).exists() {
             return Err(Error::ProcessorNotFound(processor_id.to_string()));
+        }
+
+        // Every link on the node is removed as a link, which reclaims both
+        // endpoints' ports. Dropping the node alone cascades its edges out of
+        // the graph with the peers' publishers, subscribers and notifiers
+        // still held against their channels.
+        let inbound_links: Vec<LinkUniqueId> = graph
+            .traversal_mut()
+            .v(&processor_id)
+            .in_e()
+            .iter()
+            .map(|link| link.id.clone())
+            .collect();
+        let outbound_links: Vec<LinkUniqueId> = graph
+            .traversal_mut()
+            .v(&processor_id)
+            .out_e()
+            .iter()
+            .map(|link| link.id.clone())
+            .collect();
+        for link_id in inbound_links.into_iter().chain(outbound_links) {
+            if let Some(link) = graph.traversal_mut().e(&link_id).first_mut() {
+                link.insert(PendingDeletionComponent);
+            }
+            tx.log(PendingOperation::RemoveLink(link_id));
         }
 
         if let Some(node) = graph.traversal_mut().v(&processor_id).first_mut() {
@@ -116,6 +177,8 @@ async fn remove_processor_impl(
 
         Ok(())
     })?;
+
+    commit_live_graph_change(&compiler, live).await?;
 
     PUBSUB.publish(
         topics::RUNTIME_GLOBAL,
@@ -146,11 +209,12 @@ async fn remove_processor_impl(
 /// processor's read.
 #[tracing::instrument(
     name = "runtime.connect",
-    skip(compiler),
+    skip(compiler, live),
     fields(from = %from, to = %to),
 )]
 async fn connect_impl(
     compiler: Arc<Compiler>,
+    live: LiveCommitContext,
     from: OutputLinkPortRef,
     to: InputLinkPortRef,
 ) -> Result<LinkUniqueId> {
@@ -239,6 +303,8 @@ async fn connect_impl(
         "connect assigned channel"
     );
 
+    commit_live_graph_change(&compiler, live).await?;
+
     PUBSUB.publish(
         topics::RUNTIME_GLOBAL,
         &Event::RuntimeGlobal(RuntimeEvent::RuntimeDidConnect {
@@ -257,7 +323,11 @@ async fn connect_impl(
 }
 
 /// Core implementation for disconnect - takes owned Arcs for 'static lifetime.
-async fn disconnect_impl(compiler: Arc<Compiler>, link_id: LinkUniqueId) -> Result<()> {
+async fn disconnect_impl(
+    compiler: Arc<Compiler>,
+    live: LiveCommitContext,
+    link_id: LinkUniqueId,
+) -> Result<()> {
     let link_info = compiler.scope(|graph, tx| {
         let (from_value, to_value) = graph
             .traversal()
@@ -279,6 +349,8 @@ async fn disconnect_impl(compiler: Arc<Compiler>, link_id: LinkUniqueId) -> Resu
 
         Ok::<_, Error>(info)
     })?;
+
+    commit_live_graph_change(&compiler, live).await?;
 
     PUBSUB.publish(
         topics::RUNTIME_GLOBAL,
@@ -307,22 +379,32 @@ async fn disconnect_impl(compiler: Arc<Compiler>, link_id: LinkUniqueId) -> Resu
 }
 
 impl Runner {
+    /// The context a graph mutation compiles against right away, or `None`
+    /// while the graph is still being built ahead of `start()`.
+    fn live_commit_context(&self) -> LiveCommitContext {
+        if *self.status.lock() != RuntimeStatus::Started {
+            return None;
+        }
+        self.runtime_context.lock().clone()
+    }
+
     /// Add a processor and report the display name the graph assigned it, which
     /// is the requested one only when no other node already answered to it.
     pub fn add_processor_reporting_assigned_display_name(
         &self,
         spec: ProcessorSpec,
     ) -> Result<(ProcessorUniqueId, String)> {
+        let live = self.live_commit_context();
         match &self.tokio_runtime_variant {
             TokioRuntimeVariant::OwnedTokioRuntime(rt) => {
                 let compiler = Arc::clone(&self.compiler);
-                rt.block_on(add_processor_impl(compiler, spec))
+                rt.block_on(add_processor_impl(compiler, live, spec))
             }
             TokioRuntimeVariant::ExternalTokioHandle(handle) => {
                 let compiler = Arc::clone(&self.compiler);
                 let (tx, rx) = std::sync::mpsc::channel();
                 handle.spawn(async move {
-                    let result = add_processor_impl(compiler, spec).await;
+                    let result = add_processor_impl(compiler, live, spec).await;
                     let _ = tx.send(result);
                 });
                 rx.recv()
@@ -343,8 +425,9 @@ impl RuntimeOperations for Runner {
 
     fn add_processor_async(&self, spec: ProcessorSpec) -> BoxFuture<'_, Result<ProcessorUniqueId>> {
         let compiler = Arc::clone(&self.compiler);
+        let live = self.live_commit_context();
         Box::pin(async move {
-            add_processor_impl(compiler, spec)
+            add_processor_impl(compiler, live, spec)
                 .await
                 .map(|(processor_id, _assigned_display_name)| processor_id)
         })
@@ -352,7 +435,8 @@ impl RuntimeOperations for Runner {
 
     fn remove_processor_async(&self, processor_id: ProcessorUniqueId) -> BoxFuture<'_, Result<()>> {
         let compiler = Arc::clone(&self.compiler);
-        Box::pin(remove_processor_impl(compiler, processor_id))
+        let live = self.live_commit_context();
+        Box::pin(remove_processor_impl(compiler, live, processor_id))
     }
 
     fn connect_async(
@@ -361,12 +445,14 @@ impl RuntimeOperations for Runner {
         to: InputLinkPortRef,
     ) -> BoxFuture<'_, Result<LinkUniqueId>> {
         let compiler = Arc::clone(&self.compiler);
-        Box::pin(connect_impl(compiler, from, to))
+        let live = self.live_commit_context();
+        Box::pin(connect_impl(compiler, live, from, to))
     }
 
     fn disconnect_async(&self, link_id: LinkUniqueId) -> BoxFuture<'_, Result<()>> {
         let compiler = Arc::clone(&self.compiler);
-        Box::pin(disconnect_impl(compiler, link_id))
+        let live = self.live_commit_context();
+        Box::pin(disconnect_impl(compiler, live, link_id))
     }
 
     fn to_json_async(&self) -> BoxFuture<'_, Result<serde_json::Value>> {
@@ -495,10 +581,11 @@ impl RuntimeOperations for Runner {
             }
             TokioRuntimeVariant::ExternalTokioHandle(handle) => {
                 let compiler = Arc::clone(&self.compiler);
+                let live = self.live_commit_context();
                 let processor_id = processor_id.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
                 handle.spawn(async move {
-                    let result = remove_processor_impl(compiler, processor_id).await;
+                    let result = remove_processor_impl(compiler, live, processor_id).await;
                     let _ = tx.send(result);
                 });
                 rx.recv()
@@ -512,9 +599,10 @@ impl RuntimeOperations for Runner {
             TokioRuntimeVariant::OwnedTokioRuntime(rt) => rt.block_on(self.connect_async(from, to)),
             TokioRuntimeVariant::ExternalTokioHandle(handle) => {
                 let compiler = Arc::clone(&self.compiler);
+                let live = self.live_commit_context();
                 let (tx, rx) = std::sync::mpsc::channel();
                 handle.spawn(async move {
-                    let result = connect_impl(compiler, from, to).await;
+                    let result = connect_impl(compiler, live, from, to).await;
                     let _ = tx.send(result);
                 });
                 rx.recv()
@@ -530,10 +618,11 @@ impl RuntimeOperations for Runner {
             }
             TokioRuntimeVariant::ExternalTokioHandle(handle) => {
                 let compiler = Arc::clone(&self.compiler);
+                let live = self.live_commit_context();
                 let link_id = link_id.clone();
                 let (tx, rx) = std::sync::mpsc::channel();
                 handle.spawn(async move {
-                    let result = disconnect_impl(compiler, link_id).await;
+                    let result = disconnect_impl(compiler, live, link_id).await;
                     let _ = tx.send(result);
                 });
                 rx.recv()
@@ -571,11 +660,14 @@ mod connect_wires_without_inspecting_a_port_tests {
 
     use serde_json::Value;
 
-    use super::connect_impl;
-    use crate::core::compiler::Compiler;
+    use super::{connect_impl, remove_processor_impl};
+    use crate::core::compiler::{Compiler, PendingOperation};
     use crate::core::descriptors::ProcessorClassImportPath;
     use crate::core::descriptors::{PortDescriptor, ProcessorClassShortName, ProcessorDescriptor};
-    use crate::core::graph::{InputLinkPortRef, OutputLinkPortRef, ProcessorUniqueId};
+    use crate::core::graph::{
+        GraphEdgeWithComponents, InputLinkPortRef, OutputLinkPortRef, PendingDeletionComponent,
+        ProcessorUniqueId,
+    };
     use crate::core::processors::{PROCESSOR_REGISTRY, ProcessorSpec};
     use crate::core::test_support::CapturedTracingWarnings;
 
@@ -596,29 +688,32 @@ mod connect_wires_without_inspecting_a_port_tests {
 
     /// Register the producer and consumer descriptors this module wires.
     fn register_producer_and_consumer_descriptors() {
-        let mut producer = ProcessorDescriptor::new(
-            class_short_name(PRODUCER_TYPE),
-            producer_class_path(),
-            "producer",
-        );
-        producer
-            .outputs
-            .push(PortDescriptor::iceoryx2("out", "output"));
-        PROCESSOR_REGISTRY
-            .register_descriptor_only(producer)
-            .expect("register producer descriptor");
+        static REGISTERED_ONCE_PER_PROCESS: std::sync::Once = std::sync::Once::new();
+        REGISTERED_ONCE_PER_PROCESS.call_once(|| {
+            let mut producer = ProcessorDescriptor::new(
+                class_short_name(PRODUCER_TYPE),
+                producer_class_path(),
+                "producer",
+            );
+            producer
+                .outputs
+                .push(PortDescriptor::iceoryx2("out", "output"));
+            PROCESSOR_REGISTRY
+                .register_descriptor_only(producer)
+                .expect("register producer descriptor");
 
-        let mut consumer = ProcessorDescriptor::new(
-            class_short_name(CONSUMER_TYPE),
-            consumer_class_path(),
-            "consumer",
-        );
-        consumer
-            .inputs
-            .push(PortDescriptor::iceoryx2("in", "input").with_delivery_profile("newest"));
-        PROCESSOR_REGISTRY
-            .register_descriptor_only(consumer)
-            .expect("register consumer descriptor");
+            let mut consumer = ProcessorDescriptor::new(
+                class_short_name(CONSUMER_TYPE),
+                consumer_class_path(),
+                "consumer",
+            );
+            consumer
+                .inputs
+                .push(PortDescriptor::iceoryx2("in", "input").with_delivery_profile("newest"));
+            PROCESSOR_REGISTRY
+                .register_descriptor_only(consumer)
+                .expect("register consumer descriptor");
+        });
     }
 
     /// Fresh compiler holding one producer and one consumer node, plus the
@@ -659,13 +754,67 @@ mod connect_wires_without_inspecting_a_port_tests {
             tokio::runtime::Builder::new_current_thread()
                 .build()
                 .expect("current-thread runtime")
-                .block_on(connect_impl(compiler, from, to))
+                .block_on(connect_impl(compiler, None, from, to))
         });
 
         result.expect("connect must wire any two ports — a link is pure plumbing");
         assert!(
             captured.is_empty(),
             "connect must emit no WARN when wiring a link; captured: {captured:?}"
+        );
+    }
+
+    /// Removing a processor removes each of its links as a link, ahead of the
+    /// node, so the compile reclaims both endpoints' ports through the link
+    /// path. Revert lock: log only `RemoveProcessor` and the node's removal
+    /// cascades its edges out of the graph with the peer's publisher,
+    /// subscriber and notifier still held against their channels.
+    #[test]
+    fn remove_processor_logs_every_incident_link_ahead_of_the_node() {
+        register_producer_and_consumer_descriptors();
+        let (compiler, from, to) = compiler_holding_a_producer_and_consumer_node();
+        let consumer_id = to.processor_id.clone();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime");
+
+        let link_id = runtime
+            .block_on(connect_impl(Arc::clone(&compiler), None, from, to))
+            .expect("the link is created");
+        runtime
+            .block_on(remove_processor_impl(
+                Arc::clone(&compiler),
+                None,
+                consumer_id.clone(),
+            ))
+            .expect("the consumer is removed");
+
+        let logged = compiler.logged_pending_operations();
+        let link_removal = logged
+            .iter()
+            .position(|op| matches!(op, PendingOperation::RemoveLink(id) if *id == link_id))
+            .expect("the link's own removal is logged");
+        let node_removal = logged
+            .iter()
+            .position(
+                |op| matches!(op, PendingOperation::RemoveProcessor(id) if *id == consumer_id),
+            )
+            .expect("the node's removal is logged");
+        assert!(
+            link_removal < node_removal,
+            "the link goes before the node it hangs off; logged {logged:?}"
+        );
+        let link_is_marked_for_deletion = compiler.scope(|graph, _tx| {
+            graph
+                .traversal()
+                .e(&link_id)
+                .first()
+                .map(|link| link.has::<PendingDeletionComponent>())
+                .unwrap_or(false)
+        });
+        assert!(
+            link_is_marked_for_deletion,
+            "the link is marked pending deletion like the node"
         );
     }
 }

@@ -2253,22 +2253,31 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   hosted in-process by any runtime that enables it. The MCP tool set is the canonical
   control vocabulary; the CLI is a pure JSON-RPC client of it — agents and humans use
   the same verbs; REST/WS routes serve the same operations for programmatic clients.
-  Post-pivot the vocabulary is observation-shaped, and the served MCP tool set is
-  exactly `graph`, `tap`, `logs`, `exchange` and `shutdown` — `health` is a REST route
-  and `nodes` a registry surface, neither of them a tool. `exchange` joins as an
-  observation verb without loosening the pivot's rule: the control plane never mutates
-  the graph — the live-mutation verbs (submit / replace / connect / remove) and their
-  MCP tools are removed, code is the source of truth, the edit loop is `dev`, not live
-  mutation — because a read that costs the node a bounded copy is still a read. MCP is
+  The served MCP tool set is exactly the observation verbs `graph`, `tap`, `logs`,
+  `exchange` and `shutdown` beside the four graph-mutation verbs the engine's runtime
+  API has always carried — `add_processor`, `remove_processor`, `connect` and
+  `disconnect`; `health` is a REST route and `nodes` a registry surface, neither of
+  them a tool. The ripout's "the control plane never mutates the graph — code is the
+  source of truth, the edit loop is `dev`" clause is reversed (owner, 2026-09-06:
+  removing live mutation was an overstep; a dynamic graph an agent cannot add to is
+  not worth having). A mutation compiles inside the call, so the caller learns whether
+  its change took rather than reading a `Running` node with nothing flowing. A Python
+  class is named by its import path and registered on its first add exactly as
+  `rt.add` registers it — the app process imports the class, the processor runs in
+  its own helper process — and a native built-in by the path `graph` reports for one;
+  a link wired onto a running processor reaches it, and every channel is sized for a
+  destination that connects later. `exchange` stays an observation verb because a read
+  that costs the node a bounded copy is still a read. MCP is
   served by the node's control plane at `POST /mcp`, mounted with the node and sharing
   its lifecycle; it has exactly one transport, and no CLI verb, stdio server, or bridge
   process stands between a host and that endpoint — an MCP host is configured with a
   running node's URL.
   [importable-python-library, mcp-served-with-the-node — SHIPPED #1712;
   control-plane-surface-pixel-exchange — SHIPPED #1972, #1974 for the vocabulary
-  sentence]
+  sentence; live graph mutation restored by owner ruling 2026-09-06]
   <!-- verify: sdk/streamlib-python-wheel/tests/test_cli.py::test_the_wheel_serves_no_mcp_verb -->
-  <!-- verify: cargo test -p streamlib-api-server tools_list_advertises_exactly_the_observation_vocabulary -->
+  <!-- verify: cargo test -p streamlib-api-server tools_list_advertises_exactly_the_control_vocabulary -->
+  <!-- verify: pytest sdk/streamlib-python-wheel/tests/test_live_graph_mutation.py -->
 - **DECIDED** — `dev` and `run` bind the control plane identically: all interfaces
   (`0.0.0.0`) by default, narrowed per invocation by `--host`. There is no dev-only
   exposure posture — a node another host can reach is bound wide by definition, so

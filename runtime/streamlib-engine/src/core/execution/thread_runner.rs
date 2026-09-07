@@ -180,32 +180,44 @@ fn run_reactive_mode(
     // processor whose ports are empty — or not wired yet — wakes on that
     // cadence and goes back to sleep. That is the same rule the helper loop
     // has always applied to every Python processor.
-    let listener_fd = {
-        let guard = processor.lock();
-        guard
-            .iceoryx2_input_mailboxes_inner()
-            .and_then(|inner| inner.listener_fd())
-    };
-
+    //
+    // The listener is looked for on every pass until one is found, not once
+    // before the loop: a processor added to a running graph gets its first
+    // inbound link — and with it the listener — only when a later connect
+    // wires it.
     #[cfg(target_os = "linux")]
-    let waiter = match listener_fd {
-        Some(fd) => match ReactiveLoopFdWaiter::new(fd, shutdown_eventfd) {
-            Ok(w) => Some(w),
-            Err(e) => {
-                tracing::warn!(
-                    "[{}] Reactive epoll setup failed, falling back to channel-poll loop: {}",
-                    id,
-                    e
-                );
-                None
-            }
-        },
-        None => None,
-    };
+    let mut shutdown_eventfd = shutdown_eventfd;
+    #[cfg(target_os = "linux")]
+    let mut waiter: Option<ReactiveLoopFdWaiter> = None;
+    #[cfg(target_os = "linux")]
+    let mut epoll_setup_failed = false;
 
     let mut was_paused = false;
 
     loop {
+        #[cfg(target_os = "linux")]
+        if waiter.is_none() && !epoll_setup_failed {
+            let listener_fd = {
+                let guard = processor.lock();
+                guard
+                    .iceoryx2_input_mailboxes_inner()
+                    .and_then(|inner| inner.listener_fd())
+            };
+            if let Some(fd) = listener_fd {
+                match ReactiveLoopFdWaiter::new(fd, shutdown_eventfd.take()) {
+                    Ok(w) => waiter = Some(w),
+                    Err(e) => {
+                        tracing::warn!(
+                            "[{}] Reactive epoll setup failed, falling back to channel-poll loop: {}",
+                            id,
+                            e
+                        );
+                        epoll_setup_failed = true;
+                    }
+                }
+            }
+        }
+
         // Channel-side shutdown check covers two paths:
         //   1. The fallback sleep loop (no waiter — non-Linux or epoll setup
         //      failure), which has no way to wake on shutdown otherwise.

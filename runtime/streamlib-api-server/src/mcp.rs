@@ -13,10 +13,12 @@
 //! attach. It exposes the runtime as MCP *tools* so an LLM agent observes the
 //! live graph the same way the REST client does.
 //!
-//! The vocabulary is observation-shaped — graph, tap, logs, exchange,
-//! shutdown. Live graph mutation is not part of it: code is the source of
-//! truth and the edit loop is `dev`, so there is no tool that submits,
-//! replaces, connects, or removes.
+//! The vocabulary is the observation verbs — graph, tap, logs, exchange,
+//! shutdown — beside the four graph-mutation verbs the engine's own runtime
+//! API has always had: `add_processor`, `remove_processor`, `connect` and
+//! `disconnect`. A mutation tool answers when the engine accepted the change
+//! into its graph; the wiring itself commits on the engine's own compile task,
+//! whose failure `graph` and `logs` show rather than this call.
 //!
 //! `exchange` is the one tool whose result is not text: it answers a
 //! published surface id with the frame itself, as an image content block the
@@ -44,7 +46,10 @@ use base64::Engine as _;
 use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use streamlib::sdk::descriptors::ProcessorClassImportPath;
 use streamlib::sdk::error::Result;
+use streamlib::sdk::graph::{InputLinkPortRef, LinkUniqueId, OutputLinkPortRef, ProcessorUniqueId};
+use streamlib::sdk::processors::ProcessorSpec;
 use streamlib::sdk::pubsub::{Event, EventListener, PUBSUB, topics};
 use streamlib::sdk::runtime::{ExchangedPublishedSurfaceFramePngImage, RuntimeOperations};
 
@@ -221,7 +226,7 @@ fn initialize_result() -> Value {
         "protocolVersion": MCP_PROTOCOL_VERSION,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": MCP_SERVER_NAME, "version": MCP_SERVER_VERSION },
-        "instructions": "StreamLib runtime control plane. Tools observe a running node: its processor graph, its channels, and its event stream. The graph is defined by the node's code, not by this surface — there is no tool that mutates it.",
+        "instructions": "StreamLib runtime control plane for one running node. Observe it with `graph` (processors, their ids, port names and links), `tap` (raw bags on a channel spelled `<processor id, lowercased>/<output port>`), `logs` and `exchange` (a published frame's pixels). Change its live graph with `add_processor`, `connect`, `disconnect` and `remove_processor`: a Python processor class written to a module the app can import — a file beside `app.py`, or a pip-installed package — is added by its `module:ClassName` path and runs in its own helper process; a link is spliced in by connecting the new processor on both sides, then disconnecting the link it replaces. Read `graph` first for ids and port names, and again afterwards to confirm a link's state is `wired` and the processor is `Running`.",
     })
 }
 
@@ -288,6 +293,59 @@ fn tool_definitions() -> Vec<Value> {
                 "additionalProperties": false
             },
         }),
+        json!({
+            "name": "add_processor",
+            "description": "Add a processor to the running graph by its class import path — the `type` string `graph` reports for every node. A Python class is named `module:QualifiedClassName` and must be importable from the app's own environment (a module beside `app.py`, or a pip-installed package); a built-in is named by the `type` an existing node of that kind shows. Returns the new processor's id, which `connect` and `remove_processor` take, once the engine has spawned the processor — a Python class in its own helper process, which imports the module fresh, so edited code is picked up by every new add. The class's port declaration is read the first time it is added and kept; to change a class's ports, add it under a new class name. Read `graph` to see its state and ports.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "type": { "type": "string", "description": "The processor class import path, e.g. `processors.grayscale_effect:GrayscaleEffect`." },
+                    "config": { "type": "object", "description": "The processor's configuration — for a Python class, the keyword arguments its constructor takes. Omit for none." },
+                    "display_name": { "type": "string", "description": "Human-facing label; defaults to the class's short name, disambiguated within the graph." }
+                },
+                "required": ["type"],
+                "additionalProperties": false
+            },
+        }),
+        json!({
+            "name": "remove_processor",
+            "description": "Remove a processor from the running graph by id, stopping it and dropping its node. Its links go with it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "processor_id": { "type": "string", "description": "A processor id `graph` or `add_processor` reported." }
+                },
+                "required": ["processor_id"],
+                "additionalProperties": false
+            },
+        }),
+        json!({
+            "name": "connect",
+            "description": "Link one processor's output port to another's input port. Port names are what `graph` lists under each node's `outputs` and `inputs`. Returns the link id `disconnect` takes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from_processor_id": { "type": "string", "description": "The source processor's id." },
+                    "from_port": { "type": "string", "description": "The source's output port name." },
+                    "to_processor_id": { "type": "string", "description": "The destination processor's id." },
+                    "to_port": { "type": "string", "description": "The destination's input port name." }
+                },
+                "required": ["from_processor_id", "from_port", "to_processor_id", "to_port"],
+                "additionalProperties": false
+            },
+        }),
+        json!({
+            "name": "disconnect",
+            "description": "Remove a link from the running graph by id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "link_id": { "type": "string", "description": "A link id `graph` or `connect` reported." }
+                },
+                "required": ["link_id"],
+                "additionalProperties": false
+            },
+        }),
     ]
 }
 
@@ -319,6 +377,10 @@ async fn tools_call(
         "logs" => call_logs(runtime, arguments).await,
         "exchange" => call_exchange(runtime, arguments).await,
         "shutdown" => call_shutdown(runtime, arguments),
+        "add_processor" => call_add_processor(runtime, arguments).await,
+        "remove_processor" => call_remove_processor(runtime, arguments).await,
+        "connect" => call_connect(runtime, arguments).await,
+        "disconnect" => call_disconnect(runtime, arguments).await,
         other => tool_error(format!("unknown tool: {other}")),
     };
     Ok(result)
@@ -510,6 +572,103 @@ fn call_shutdown(runtime: &Arc<dyn RuntimeOperations>, arguments: Value) -> Valu
     }
 }
 
+async fn call_add_processor(runtime: &Arc<dyn RuntimeOperations>, arguments: Value) -> Value {
+    #[derive(Deserialize)]
+    struct AddProcessorArguments {
+        #[serde(rename = "type")]
+        processor_class_import_path: String,
+        #[serde(default)]
+        config: Option<Value>,
+        #[serde(default)]
+        display_name: Option<String>,
+    }
+    let arguments: AddProcessorArguments = match serde_json::from_value(arguments) {
+        Ok(arguments) => arguments,
+        Err(e) => return tool_error(format!("add_processor arguments: {e}")),
+    };
+    let processor_class_import_path =
+        match ProcessorClassImportPath::new(&arguments.processor_class_import_path) {
+            Ok(path) => path,
+            Err(e) => return tool_error(format!("add_processor `type`: {e}")),
+        };
+    // Absent is an empty object, never null: a config struct deserializes from
+    // `{}` and not from `null`.
+    let config = match arguments.config {
+        None | Some(Value::Null) => Value::Object(serde_json::Map::new()),
+        Some(object @ Value::Object(_)) => object,
+        Some(other) => {
+            return tool_error(format!(
+                "add_processor `config` must be a JSON object, got {other}"
+            ));
+        }
+    };
+    let mut spec = ProcessorSpec::new(processor_class_import_path, config);
+    spec.display_name = arguments.display_name;
+
+    match runtime.add_processor_async(spec).await {
+        Ok(processor_id) => tool_ok(json!({ "processor_id": processor_id.as_str() })),
+        Err(e) => tool_error(format!("add_processor failed: {e}")),
+    }
+}
+
+async fn call_remove_processor(runtime: &Arc<dyn RuntimeOperations>, arguments: Value) -> Value {
+    #[derive(Deserialize)]
+    struct RemoveProcessorArguments {
+        processor_id: String,
+    }
+    let arguments: RemoveProcessorArguments = match serde_json::from_value(arguments) {
+        Ok(arguments) => arguments,
+        Err(e) => return tool_error(format!("remove_processor arguments: {e}")),
+    };
+    let processor_id = ProcessorUniqueId::from(arguments.processor_id.as_str());
+    match runtime.remove_processor_async(processor_id).await {
+        Ok(()) => tool_ok(json!({ "removed_processor_id": arguments.processor_id })),
+        Err(e) => tool_error(format!("remove_processor failed: {e}")),
+    }
+}
+
+async fn call_connect(runtime: &Arc<dyn RuntimeOperations>, arguments: Value) -> Value {
+    #[derive(Deserialize)]
+    struct ConnectArguments {
+        from_processor_id: String,
+        from_port: String,
+        to_processor_id: String,
+        to_port: String,
+    }
+    let arguments: ConnectArguments = match serde_json::from_value(arguments) {
+        Ok(arguments) => arguments,
+        Err(e) => return tool_error(format!("connect arguments: {e}")),
+    };
+    let from = OutputLinkPortRef::new(
+        ProcessorUniqueId::from(arguments.from_processor_id.as_str()),
+        arguments.from_port,
+    );
+    let to = InputLinkPortRef::new(
+        ProcessorUniqueId::from(arguments.to_processor_id.as_str()),
+        arguments.to_port,
+    );
+    match runtime.connect_async(from, to).await {
+        Ok(link_id) => tool_ok(json!({ "link_id": link_id.as_str() })),
+        Err(e) => tool_error(format!("connect failed: {e}")),
+    }
+}
+
+async fn call_disconnect(runtime: &Arc<dyn RuntimeOperations>, arguments: Value) -> Value {
+    #[derive(Deserialize)]
+    struct DisconnectArguments {
+        link_id: String,
+    }
+    let arguments: DisconnectArguments = match serde_json::from_value(arguments) {
+        Ok(arguments) => arguments,
+        Err(e) => return tool_error(format!("disconnect arguments: {e}")),
+    };
+    let link_id = LinkUniqueId::from(arguments.link_id.as_str());
+    match runtime.disconnect_async(link_id).await {
+        Ok(()) => tool_ok(json!({ "disconnected_link_id": arguments.link_id })),
+        Err(e) => tool_error(format!("disconnect failed: {e}")),
+    }
+}
+
 // ============================================================================
 // Result shaping
 // ============================================================================
@@ -689,13 +848,13 @@ mod tests {
     /// recording every shutdown reason so a dispatch test can confirm the tool
     /// reached the matching runtime op.
     ///
-    /// Every graph-mutating op is `unreachable!`. `RuntimeOperations` still
-    /// declares them — the runtime API is not what changed — but no tool may
-    /// reach one, so a dispatch arm that regrows here fails loudly instead of
-    /// quietly succeeding against a permissive stub.
+    /// Every graph-mutating op records what it was handed and answers a fixed
+    /// id, so a mutation tool's test asserts the op it reached and the
+    /// arguments it carried.
     struct ControlPlaneMcpDispatchStubRuntime {
         tap_plan: Option<StubTapPlan>,
         recorded_shutdown_reasons: Arc<Mutex<Vec<String>>>,
+        recorded_graph_mutations: crate::control_plane_stub_support::RecordedGraphMutations,
         exchange: StubSurfaceExchange,
     }
 
@@ -704,6 +863,7 @@ mod tests {
             Self {
                 tap_plan: None,
                 recorded_shutdown_reasons: Arc::new(Mutex::new(Vec::new())),
+                recorded_graph_mutations: Arc::new(Mutex::new(Vec::new())),
                 exchange: StubSurfaceExchange::default(),
             }
         }
@@ -767,7 +927,7 @@ mod tests {
                 ))
             })
         }
-        crate::control_plane_stub_support::graph_mutation_ops_are_unreachable!("tool");
+        crate::control_plane_stub_support::graph_mutation_ops_record_the_call!();
         crate::control_plane_stub_support::surface_exchange_op_answers_the_stub!();
         fn request_runtime_shutdown(&self, reason: &str) -> Result<()> {
             self.recorded_shutdown_reasons
@@ -782,15 +942,16 @@ mod tests {
 
     /// The control vocabulary, in catalog order. This is the whole of it —
     /// `tools/list` is asserted equal to this, not merely a superset.
-    const OBSERVATION_TOOL_NAMES: &[&str] = &["graph", "tap", "logs", "exchange", "shutdown"];
-
-    /// The tools this control plane deliberately does not serve: every graph
-    /// mutation the pre-pivot MCP veneer exposed.
-    const DELETED_GRAPH_MUTATION_TOOL_NAMES: &[&str] = &[
-        "submit_processor",
-        "replace_processor",
+    const CONTROL_TOOL_NAMES: &[&str] = &[
+        "graph",
+        "tap",
+        "logs",
+        "exchange",
+        "shutdown",
+        "add_processor",
         "remove_processor",
         "connect",
+        "disconnect",
     ];
 
     fn mcp_router(runtime: Arc<dyn RuntimeOperations>) -> Router {
@@ -852,7 +1013,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_advertises_exactly_the_observation_vocabulary() {
+    async fn tools_list_advertises_exactly_the_control_vocabulary() {
         let (status, body) = mcp_call(
             Arc::new(ControlPlaneMcpDispatchStubRuntime::new()),
             json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
@@ -870,8 +1031,8 @@ mod tests {
         // tool appearing here that is not in this list is a surface the plan
         // does not grant.
         assert_eq!(
-            names, OBSERVATION_TOOL_NAMES,
-            "tools/list must advertise exactly the observation vocabulary"
+            names, CONTROL_TOOL_NAMES,
+            "tools/list must advertise exactly the control vocabulary"
         );
         for tool in tools {
             assert_eq!(
@@ -882,33 +1043,173 @@ mod tests {
         }
     }
 
-    /// Every deleted tool must answer as an unknown tool rather than reaching
-    /// the runtime — the dispatch arm is gone, not merely undocumented.
     #[tokio::test]
-    async fn tools_call_rejects_every_graph_mutation_tool_as_unknown() {
-        for absent in DELETED_GRAPH_MUTATION_TOOL_NAMES {
-            let (status, body) = mcp_call(
-                Arc::new(ControlPlaneMcpDispatchStubRuntime::new()),
-                json!({
-                    "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                    "params": { "name": absent, "arguments": {} }
-                }),
-            )
-            .await;
+    async fn tools_call_add_processor_reaches_the_runtime_op_with_the_spec() {
+        let runtime = Arc::new(ControlPlaneMcpDispatchStubRuntime::new());
+        let recorded = runtime.recorded_graph_mutations.clone();
 
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(
-                body["result"]["isError"], true,
-                "`{absent}` must be an in-band tool error; got {body}"
-            );
-            let text = body["result"]["content"][0]["text"]
+        let (status, body) = mcp_call(
+            runtime,
+            json!({
+                "jsonrpc": "2.0", "id": 30, "method": "tools/call",
+                "params": { "name": "add_processor", "arguments": {
+                    "type": "processors.grayscale_effect:GrayscaleEffect",
+                    "config": { "strength": 0.5 },
+                    "display_name": "Gray"
+                } }
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["isError"], false, "body={body}");
+        let text = body["result"]["content"][0]["text"].as_str().unwrap();
+        let stated: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            stated["processor_id"],
+            crate::control_plane_stub_support::STUB_ADDED_PROCESSOR_ID
+        );
+        let recorded = recorded.lock();
+        let [crate::control_plane_stub_support::RecordedGraphMutation::AddProcessor(spec)] =
+            &recorded[..]
+        else {
+            panic!("add_processor must reach exactly one add op, recorded {recorded:?}");
+        };
+        assert_eq!(
+            spec.name.as_str(),
+            "processors.grayscale_effect:GrayscaleEffect"
+        );
+        assert_eq!(spec.config["strength"], 0.5);
+        assert_eq!(spec.display_name.as_deref(), Some("Gray"));
+    }
+
+    #[tokio::test]
+    async fn tools_call_add_processor_without_config_sends_an_empty_object_not_null() {
+        let runtime = Arc::new(ControlPlaneMcpDispatchStubRuntime::new());
+        let recorded = runtime.recorded_graph_mutations.clone();
+
+        let (_, body) = mcp_call(
+            runtime,
+            json!({
+                "jsonrpc": "2.0", "id": 31, "method": "tools/call",
+                "params": { "name": "add_processor", "arguments": { "type": "streamlib:CameraSource" } }
+            }),
+        )
+        .await;
+
+        assert_eq!(body["result"]["isError"], false, "body={body}");
+        let recorded = recorded.lock();
+        let [crate::control_plane_stub_support::RecordedGraphMutation::AddProcessor(spec)] =
+            &recorded[..]
+        else {
+            panic!("expected one add op, recorded {recorded:?}");
+        };
+        assert_eq!(spec.config, json!({}));
+        assert_eq!(spec.display_name, None);
+    }
+
+    #[tokio::test]
+    async fn tools_call_connect_and_disconnect_reach_their_runtime_ops() {
+        let runtime = Arc::new(ControlPlaneMcpDispatchStubRuntime::new());
+        let recorded = runtime.recorded_graph_mutations.clone();
+
+        let (_, connect_body) = mcp_call(
+            runtime.clone(),
+            json!({
+                "jsonrpc": "2.0", "id": 32, "method": "tools/call",
+                "params": { "name": "connect", "arguments": {
+                    "from_processor_id": "cam-1", "from_port": "video",
+                    "to_processor_id": "fx-1", "to_port": "video_from_upstream"
+                } }
+            }),
+        )
+        .await;
+        assert_eq!(
+            connect_body["result"]["isError"], false,
+            "body={connect_body}"
+        );
+        let stated: Value = serde_json::from_str(
+            connect_body["result"]["content"][0]["text"]
                 .as_str()
-                .expect("text content block");
-            assert!(
-                text.contains("unknown tool"),
-                "`{absent}` must be rejected as an unknown tool; got {text}"
-            );
-        }
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            stated["link_id"],
+            crate::control_plane_stub_support::STUB_CREATED_LINK_ID
+        );
+
+        let (_, disconnect_body) = mcp_call(
+            runtime,
+            json!({
+                "jsonrpc": "2.0", "id": 33, "method": "tools/call",
+                "params": { "name": "disconnect", "arguments": { "link_id": "link-9" } }
+            }),
+        )
+        .await;
+        assert_eq!(
+            disconnect_body["result"]["isError"], false,
+            "body={disconnect_body}"
+        );
+
+        let recorded = recorded.lock();
+        let [
+            crate::control_plane_stub_support::RecordedGraphMutation::Connect(from, to),
+            crate::control_plane_stub_support::RecordedGraphMutation::Disconnect(link_id),
+        ] = &recorded[..]
+        else {
+            panic!("expected a connect then a disconnect, recorded {recorded:?}");
+        };
+        assert_eq!(from.processor_id.as_str(), "cam-1");
+        assert_eq!(from.port_name, "video");
+        assert_eq!(to.processor_id.as_str(), "fx-1");
+        assert_eq!(to.port_name, "video_from_upstream");
+        assert_eq!(link_id.as_str(), "link-9");
+    }
+
+    #[tokio::test]
+    async fn tools_call_remove_processor_reaches_the_runtime_op() {
+        let runtime = Arc::new(ControlPlaneMcpDispatchStubRuntime::new());
+        let recorded = runtime.recorded_graph_mutations.clone();
+
+        let (_, body) = mcp_call(
+            runtime,
+            json!({
+                "jsonrpc": "2.0", "id": 34, "method": "tools/call",
+                "params": { "name": "remove_processor", "arguments": { "processor_id": "fx-1" } }
+            }),
+        )
+        .await;
+        assert_eq!(body["result"]["isError"], false, "body={body}");
+
+        let recorded = recorded.lock();
+        let [crate::control_plane_stub_support::RecordedGraphMutation::RemoveProcessor(id)] =
+            &recorded[..]
+        else {
+            panic!("expected one remove op, recorded {recorded:?}");
+        };
+        assert_eq!(id.as_str(), "fx-1");
+    }
+
+    #[tokio::test]
+    async fn a_mutation_tool_with_malformed_arguments_is_a_tool_error_that_reaches_no_op() {
+        let runtime = Arc::new(ControlPlaneMcpDispatchStubRuntime::new());
+        let recorded = runtime.recorded_graph_mutations.clone();
+
+        let (status, body) = mcp_call(
+            runtime,
+            json!({
+                "jsonrpc": "2.0", "id": 35, "method": "tools/call",
+                "params": { "name": "connect", "arguments": { "from_processor_id": "cam-1" } }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["isError"], true, "body={body}");
+        assert!(
+            recorded.lock().is_empty(),
+            "a refused call must reach no runtime op"
+        );
     }
 
     #[tokio::test]
