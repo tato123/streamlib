@@ -6,8 +6,9 @@ the one machine-setup verb, `enable-virtual-camera`.
 
 `nodes`, `graph`, `tap`, `logs`, and `exchange` observe nodes that are already
 running — `nodes` off the on-disk registry, the rest as clients of a node's
-control plane. None of them mutates a graph: a node's graph is defined by its
-code, and the edit loop is re-running `dev`.
+control plane. None of them mutates a graph; the control plane's mutation tools
+(`add_processor`, `connect`, `disconnect`, `remove_processor`) are reached over
+MCP, and the edit loop for the code itself is re-running `dev`.
 
 `enable-virtual-camera` touches no node and speaks no control plane: it installs
 the standard udev grant the virtual camera's loopback door needs — the module

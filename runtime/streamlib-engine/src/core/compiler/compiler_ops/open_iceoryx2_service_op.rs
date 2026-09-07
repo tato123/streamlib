@@ -32,6 +32,7 @@ use crate::iceoryx2::{
     delivery_profile_for_input_port, effective_channel_ceiling_bytes,
     refuse_an_unsettled_match_device_sentinel,
 };
+use streamlib_ipc_types::{MAX_DESTINATIONS_PER_CHANNEL, MAX_INBOUND_LINKS_PER_DESTINATION};
 
 /// Open an iceoryx2 channel for a `connect()` link in the graph.
 ///
@@ -137,7 +138,7 @@ pub fn open_iceoryx2_service(
         max_queued_messages,
         drain_order,
     } = resolve_channel_sizing(graph, &source_proc_id, &source_port)?;
-    let max_notifiers = destination_fanin(graph, &dest_proc_id);
+    let max_notifiers = destination_max_notifiers(graph, &dest_proc_id)?;
 
     let iceoryx2_node = runtime_ctx.iceoryx2_node();
     let service = iceoryx2_node.open_or_create_service(
@@ -380,16 +381,28 @@ fn channel_destinations(
         .collect()
 }
 
-/// The `max_subscribers` a channel data service must be created with: the count
-/// of destinations the channel feeds (each is one destination subscriber) plus
-/// [`RESERVED_TAP_SUBSCRIBER_SLOTS_PER_CHANNEL`].
+/// The `max_subscribers` every channel data service is created with:
+/// [`MAX_DESTINATIONS_PER_CHANNEL`] destination slots plus
+/// [`RESERVED_TAP_SUBSCRIBER_SLOTS_PER_CHANNEL`] — fixed, never the current
+/// fan-out, because iceoryx2 pins the count at create time and a link
+/// connected to a running source must fit a slot that already exists.
+///
+/// A source output port past the cap is refused here by name, before any
+/// service is touched.
 fn channel_max_subscribers(
     graph: &mut Graph,
     source_proc_id: &ProcessorUniqueId,
     source_port: &str,
-) -> usize {
-    channel_destinations(graph, source_proc_id, source_port).len()
-        + RESERVED_TAP_SUBSCRIBER_SLOTS_PER_CHANNEL
+) -> Result<usize> {
+    let destinations = channel_destinations(graph, source_proc_id, source_port).len();
+    if destinations > MAX_DESTINATIONS_PER_CHANNEL {
+        return Err(Error::Configuration(format!(
+            "output port '{source_proc_id}:{source_port}' would feed {destinations} \
+             destinations, and a channel carries at most {MAX_DESTINATIONS_PER_CHANNEL}; \
+             fan out through another output port"
+        )));
+    }
+    Ok(MAX_DESTINATIONS_PER_CHANNEL + RESERVED_TAP_SUBSCRIBER_SLOTS_PER_CHANNEL)
 }
 
 /// The iceoryx2 sizing a channel data service is opened with — the fixed
@@ -402,7 +415,7 @@ fn channel_max_subscribers(
 /// a mismatched `max_subscribers` / `subscriber_max_buffer_size` would be
 /// rejected by iceoryx2 on open.
 pub(crate) struct ChannelSizing {
-    /// Compile-time destination count plus the reserved tap slot.
+    /// The fixed destination slot count plus the reserved tap slot.
     pub(crate) max_subscribers: usize,
     /// Ring depth (`subscriber_max_buffer_size`) — the agreed delivery profile's depth.
     pub(crate) max_queued_messages: usize,
@@ -421,7 +434,7 @@ pub(crate) fn resolve_channel_sizing(
 ) -> Result<ChannelSizing> {
     let delivery = channel_delivery_profile(graph, source_proc_id, source_port)?.resolve();
     Ok(ChannelSizing {
-        max_subscribers: channel_max_subscribers(graph, source_proc_id, source_port),
+        max_subscribers: channel_max_subscribers(graph, source_proc_id, source_port)?,
         max_queued_messages: delivery.depth,
         drain_order: delivery.drain_order,
     })
@@ -451,10 +464,21 @@ pub(crate) fn find_channel_source_port(
     })
 }
 
-/// The destination's compile-time fan-in — the count of inbound `connect()`
-/// links — which sizes `max_notifiers` on its destination-keyed notify service.
-fn destination_fanin(graph: &mut Graph, dest_proc_id: &ProcessorUniqueId) -> usize {
-    graph.traversal_mut().v(dest_proc_id).in_e().iter().count()
+/// The `max_notifiers` every destination-keyed notify service is created with:
+/// [`MAX_INBOUND_LINKS_PER_DESTINATION`], fixed for the same reason the
+/// channel's subscriber count is — the service is created with the first
+/// inbound link and a later one must fit a notifier slot that already exists.
+///
+/// A destination past the cap is refused here by name.
+fn destination_max_notifiers(graph: &mut Graph, dest_proc_id: &ProcessorUniqueId) -> Result<usize> {
+    let inbound_links = graph.traversal_mut().v(dest_proc_id).in_e().iter().count();
+    if inbound_links > MAX_INBOUND_LINKS_PER_DESTINATION {
+        return Err(Error::Configuration(format!(
+            "processor '{dest_proc_id}' would hold {inbound_links} inbound links, and a \
+             destination carries at most {MAX_INBOUND_LINKS_PER_DESTINATION}"
+        )));
+    }
+    Ok(MAX_INBOUND_LINKS_PER_DESTINATION)
 }
 
 /// Whether the destination ever drains the listener a notify service exists to
@@ -937,8 +961,10 @@ fn wire_subprocess_source(
              link-wiring envelope; its output port '{source_port}' would never be wired"
         )));
     };
-    link_wiring.record(crate::core::PortDirection::Output, entry);
-    Ok(())
+    link_wiring.record(crate::core::PortDirection::Output, entry.clone());
+    // The envelope is read once, at setup; a far side already past it is
+    // handed the entry directly.
+    source_processor.wire_out_of_process_link(crate::core::PortDirection::Output, &entry)
 }
 
 /// Record this link's dest-side wiring on a processor whose transport lives out
@@ -1016,8 +1042,8 @@ fn wire_subprocess_dest(
              link-wiring envelope; its input port '{dest_port}' would never be wired"
         )));
     };
-    link_wiring.record(crate::core::PortDirection::Input, entry);
-    Ok(())
+    link_wiring.record(crate::core::PortDirection::Input, entry.clone());
+    dest_processor.wire_out_of_process_link(crate::core::PortDirection::Input, &entry)
 }
 
 #[cfg(test)]
@@ -1048,6 +1074,9 @@ mod tests {
         /// Shared with the test, which is the only way to see what the engine
         /// asked of a host it cannot downcast to.
         reclaimed_links: Arc<Mutex<Vec<ReclaimedLink>>>,
+        /// Every link the engine handed this host after its setup, with the
+        /// direction it was wired in.
+        late_wired_links: Arc<Mutex<Vec<(crate::core::PortDirection, serde_json::Value)>>>,
     }
 
     impl DynGeneratedProcessor for OutOfCrateHelperSpawnHostStub {
@@ -1118,6 +1147,16 @@ mod tests {
                 local_port_name: local_port_name.to_string(),
                 link_id: link_id.to_string(),
             });
+            Ok(())
+        }
+        fn wire_out_of_process_link(
+            &mut self,
+            port_direction: crate::core::PortDirection,
+            link_wiring: &serde_json::Value,
+        ) -> Result<()> {
+            self.late_wired_links
+                .lock()
+                .push((port_direction, link_wiring.clone()));
             Ok(())
         }
         fn apply_config_json(&mut self, _config_json: &serde_json::Value) -> Result<()> {
@@ -1382,6 +1421,72 @@ mod tests {
                 "the {label} envelope must carry nothing for a disconnected link; got {ports}",
             );
         }
+    }
+
+    /// Wiring a link records it on the envelope AND hands the same entry to
+    /// the host, so a far side that already read its envelope at setup opens
+    /// the port now. Revert lock: drop the `wire_out_of_process_link` call
+    /// after `record` and both vectors stay empty — the link the graph then
+    /// reports `Wired` never reaches a running helper.
+    #[test]
+    fn wiring_an_out_of_process_link_hands_each_endpoint_its_entry() {
+        let mut graph = Graph::new();
+        let source_id = add_mock_output_only(&mut graph);
+        let dest_id = add_mock_input_only(&mut graph);
+
+        let source_late_wired: Arc<Mutex<Vec<(crate::core::PortDirection, serde_json::Value)>>> =
+            Arc::default();
+        let dest_late_wired: Arc<Mutex<Vec<(crate::core::PortDirection, serde_json::Value)>>> =
+            Arc::default();
+        let source_instance = attach_processor_instance(
+            &mut graph,
+            &source_id,
+            ProcessorInstance::new(Box::new(OutOfCrateHelperSpawnHostStub {
+                late_wired_links: source_late_wired.clone(),
+                ..Default::default()
+            })),
+        );
+        let dest_instance = attach_processor_instance(
+            &mut graph,
+            &dest_id,
+            ProcessorInstance::new(Box::new(OutOfCrateHelperSpawnHostStub {
+                late_wired_links: dest_late_wired.clone(),
+                ..Default::default()
+            })),
+        );
+
+        let link_id: LinkUniqueId = "L-wired-late".into();
+        record_wiring_for_both_out_of_process_endpoints(&mut graph, &source_id, &dest_id, &link_id);
+
+        let source_handed = source_late_wired.lock();
+        let [(source_direction, source_entry)] = &source_handed[..] else {
+            panic!("the source host must be handed exactly one entry; got {source_handed:?}");
+        };
+        assert_eq!(*source_direction, crate::core::PortDirection::Output);
+        assert_eq!(
+            *source_entry,
+            source_instance
+                .lock()
+                .out_of_process_link_wiring()
+                .expect("the stub records its own wiring")
+                .as_setup_command_ports()["outputs"][0],
+            "the entry handed to the source is the one its envelope recorded",
+        );
+
+        let dest_handed = dest_late_wired.lock();
+        let [(dest_direction, dest_entry)] = &dest_handed[..] else {
+            panic!("the destination host must be handed exactly one entry; got {dest_handed:?}");
+        };
+        assert_eq!(*dest_direction, crate::core::PortDirection::Input);
+        assert_eq!(
+            *dest_entry,
+            dest_instance
+                .lock()
+                .out_of_process_link_wiring()
+                .expect("the stub records its own wiring")
+                .as_setup_command_ports()["inputs"][0],
+            "the entry handed to the destination is the one its envelope recorded",
+        );
     }
 
     /// The same seam answers the "does the engine wire this one itself?"
@@ -2255,42 +2360,51 @@ mod tests {
         assert_eq!(name, "pabc123/video_out");
     }
 
-    /// A source output port feeding N destinations opens ONE channel sized for
-    /// `N + RESERVED_TAP_SUBSCRIBER_SLOTS_PER_CHANNEL` subscribers — the 1→N
-    /// fan-out subscriber count. Mentally revert the outbound-edge count to a
-    /// fixed `1` (the pre-inversion single-subscriber destination service) and
-    /// this returns the wrong count; drop the reserved tap term and the tap slot
-    /// disappears.
+    /// Every channel is created for the fixed destination cap plus the tap
+    /// slot, whatever it feeds today: iceoryx2 pins `max_subscribers` at
+    /// create time, so a link connected to a running source has to fit a slot
+    /// that already existed. Mentally revert to sizing from the current
+    /// fan-out and the first late connect onto a wired port fails to reopen
+    /// the service. Past the cap the port is refused by name, before any
+    /// service is touched.
     #[test]
-    fn channel_max_subscribers_counts_destinations_plus_tap() {
+    fn channel_max_subscribers_is_the_fixed_cap_plus_tap_and_refuses_past_it() {
         let mut graph = Graph::new();
         let src_id = add_mock_output_only(&mut graph);
-
-        // Three distinct destinations subscribe to the SAME source output port.
-        for _ in 0..3 {
-            let dest_id = add_mock_input_only(&mut graph);
+        let src_uid: ProcessorUniqueId = src_id.as_str().into();
+        let connect_one_more_destination = |graph: &mut Graph| {
+            let dest_id = add_mock_input_only(graph);
             graph.traversal_mut().add_e(
                 OutputLinkPortRef::new(&src_id, "out1"),
                 InputLinkPortRef::new(&dest_id, "in1"),
             );
-        }
+        };
 
-        let src_uid: ProcessorUniqueId = src_id.as_str().into();
-        let subs = channel_max_subscribers(&mut graph, &src_uid, "out1");
+        for _ in 0..3 {
+            connect_one_more_destination(&mut graph);
+        }
         assert_eq!(
-            subs,
-            3 + RESERVED_TAP_SUBSCRIBER_SLOTS_PER_CHANNEL,
-            "one source port feeding 3 destinations must size the channel for 3 \
-             subscribers plus the reserved tap slot",
+            channel_max_subscribers(&mut graph, &src_uid, "out1")
+                .expect("three destinations fit the cap"),
+            MAX_DESTINATIONS_PER_CHANNEL + RESERVED_TAP_SUBSCRIBER_SLOTS_PER_CHANNEL,
+            "the channel is sized for the cap, not for the three it feeds today",
+        );
+
+        for _ in 3..=MAX_DESTINATIONS_PER_CHANNEL {
+            connect_one_more_destination(&mut graph);
+        }
+        let refused = channel_max_subscribers(&mut graph, &src_uid, "out1")
+            .expect_err("one destination past the cap is refused");
+        assert!(
+            refused.to_string().contains("at most"),
+            "the refusal names the cap; got {refused}"
         );
     }
 
     /// The tap op reconstructs the exact `max_subscribers` the compiler op
-    /// opened the service with — `destinations + reserved tap` — via the shared
-    /// [`resolve_channel_sizing`]. iceoryx2 verifies `max_subscribers` on the
-    /// tap's publisher-free reopen, so a drift here would make every tap fail to
-    /// open. Mentally revert the reserved-tap term in `channel_max_subscribers`
-    /// and this count drops below what the service was created with.
+    /// opened the service with via the shared [`resolve_channel_sizing`].
+    /// iceoryx2 verifies `max_subscribers` on the tap's publisher-free reopen,
+    /// so a drift here would make every tap fail to open.
     #[test]
     fn resolve_channel_sizing_recovers_service_open_max_subscribers() {
         let mut graph = Graph::new();
@@ -2308,13 +2422,8 @@ mod tests {
             .expect("sizing resolves for a wired channel");
         assert_eq!(
             sizing.max_subscribers,
-            2 + RESERVED_TAP_SUBSCRIBER_SLOTS_PER_CHANNEL,
-            "the tap must reopen the service with the same max_subscribers the \
-             compiler op created it with (2 destinations + reserved tap)",
-        );
-        assert_eq!(
-            sizing.max_subscribers,
-            channel_max_subscribers(&mut graph, &src_uid, "out1"),
+            channel_max_subscribers(&mut graph, &src_uid, "out1")
+                .expect("two destinations fit the cap"),
             "resolve_channel_sizing must agree with channel_max_subscribers — the \
              single derivation both the service-open op and the tap op share",
         );
@@ -2353,22 +2462,42 @@ mod tests {
         );
     }
 
-    /// The destination fan-in (inbound link count) sizes the destination-keyed
-    /// notify service's `max_notifiers` — the N→1 fan-in half. Three sources fan
-    /// into one destination; the notify service must accept three notifiers.
+    /// The destination-keyed notify service is created for the fixed inbound
+    /// cap, not the fan-in of the day: it is created with the first inbound
+    /// link and iceoryx2 verifies `max_notifiers` on every reopen, so a source
+    /// connected to a running destination has to fit a notifier slot that
+    /// already existed. Past the cap the destination is refused by name.
     #[test]
-    fn destination_fanin_counts_inbound_links() {
+    fn destination_max_notifiers_is_the_fixed_cap_and_refuses_past_it() {
         let mut graph = Graph::new();
         let dest_id = add_mock_input_only(&mut graph);
-        for _ in 0..3 {
-            let src_id = add_mock_output_only(&mut graph);
+        let dest_uid: ProcessorUniqueId = dest_id.as_str().into();
+        let connect_one_more_source = |graph: &mut Graph| {
+            let src_id = add_mock_output_only(graph);
             graph.traversal_mut().add_e(
                 OutputLinkPortRef::new(&src_id, "out1"),
                 InputLinkPortRef::new(&dest_id, "in1"),
             );
+        };
+
+        for _ in 0..3 {
+            connect_one_more_source(&mut graph);
         }
-        let dest_uid: ProcessorUniqueId = dest_id.as_str().into();
-        assert_eq!(destination_fanin(&mut graph, &dest_uid), 3);
+        assert_eq!(
+            destination_max_notifiers(&mut graph, &dest_uid)
+                .expect("three inbound links fit the cap"),
+            MAX_INBOUND_LINKS_PER_DESTINATION,
+        );
+
+        for _ in 3..=MAX_INBOUND_LINKS_PER_DESTINATION {
+            connect_one_more_source(&mut graph);
+        }
+        let refused = destination_max_notifiers(&mut graph, &dest_uid)
+            .expect_err("one inbound link past the cap is refused");
+        assert!(
+            refused.to_string().contains("at most"),
+            "the refusal names the cap; got {refused}"
+        );
     }
 
     /// A source output port feeding two destinations whose input ports resolve

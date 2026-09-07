@@ -39,9 +39,13 @@ Auth and remote-access posture remain OPEN — nothing here decides a security m
   2026-08-02 by `importable-python-library.md` (the plugin ABI and packages doctrine
   are deleted): the api-server is statically-linked engine infrastructure hosted by
   the wheel and the `streamlib` crate; the relocation into `runtime/` stands and is a
-  sequencing prerequisite of the rip-out. Its mutation verbs (submit / replace /
+  sequencing prerequisite of the rip-out. ~~Its mutation verbs (submit / replace /
   connect / remove) and their MCP tools are removed — the vocabulary is
-  observation-shaped.
+  observation-shaped.~~ — Superseded 2026-09-06 by the owner's ruling that the removal
+  was an overstep: the MCP surface serves `add_processor`, `remove_processor`, `connect`
+  and `disconnect` over the engine ops that were never deleted. The source-text
+  `submit`/`replace` shape stays gone with the module loader; a class is named by its
+  import path.
 - **A discovery daemon or well-known port** — files in the per-user runtime directory
   need no daemon, survive nothing they shouldn't, and prune safely on double-dead
   evidence.

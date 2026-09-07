@@ -219,6 +219,33 @@ impl PythonRuntimeHandle {
     }
 }
 
+/// Install, once per process, the registry's resolver for a processor type
+/// named only by its import path — an `add_processor` over the control plane
+/// names a class this interpreter never imported. The resolver imports it here
+/// and registers it exactly as `rt.add` does; the processor itself still runs
+/// in its own helper process.
+fn install_unregistered_processor_type_resolver_once() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        streamlib::sdk::processors::PROCESSOR_REGISTRY.set_unregistered_processor_type_resolver(
+            std::sync::Arc::new(|processor_class_import_path| {
+                Python::attach(|python| {
+                    crate::python_processor_registration::register_processor_class_by_import_path(
+                        python,
+                        processor_class_import_path,
+                    )
+                })
+                .map_err(|import_failure| {
+                    streamlib::sdk::error::Error::Runtime(format!(
+                        "could not register `{}` from its import path: {import_failure}",
+                        processor_class_import_path.as_str()
+                    ))
+                })
+            }),
+        );
+    });
+}
+
 #[pymethods]
 impl PythonRuntimeHandle {
     /// Boot the engine.
@@ -229,6 +256,7 @@ impl PythonRuntimeHandle {
         // `sys.executable`, which is the promise: one venv, and a processor's
         // child is the same Python the app is.
         crate::python_helper_process_spawn_host::capture_helper_process_launch_environment(python)?;
+        install_unregistered_processor_type_resolver_once();
         let engine = python
             .detach(Runner::new)
             .map_err(|engine_failure| PyRuntimeError::new_err(engine_failure.to_string()))?;

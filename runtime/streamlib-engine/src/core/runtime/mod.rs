@@ -6,6 +6,7 @@ mod graph_change_listener;
 mod local_processor_type_registration;
 mod operations;
 mod operations_runtime;
+pub(crate) use operations_runtime::mark_this_thread_as_a_processor_execution_thread;
 #[allow(clippy::module_inception)]
 mod runtime;
 mod runtime_shutdown_request;

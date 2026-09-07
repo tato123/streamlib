@@ -119,6 +119,17 @@ impl ProcessorInstance {
             .unwire_out_of_process_link(port_direction, local_port_name, link_id)
     }
 
+    /// Hand a processor whose ports live outside the engine one link wired
+    /// after its setup ran, so it opens its own port for it now rather than
+    /// never.
+    pub fn wire_out_of_process_link(
+        &mut self,
+        port_direction: PortDirection,
+        link_wiring: &serde_json::Value,
+    ) -> Result<()> {
+        self.0.wire_out_of_process_link(port_direction, link_wiring)
+    }
+
     /// Borrow the host-side `OutputWriterInner` Arc this processor
     /// instance is wired to. Returns `None` if the processor has no
     /// output ports.
@@ -160,6 +171,10 @@ impl ProcessorInstance {
         let needs_inputs = self.has_iceoryx2_inputs();
         let output_inner =
             needs_outputs.then(|| Arc::new(crate::iceoryx2::OutputWriterInner::new()));
+        if let (Some(output_inner), Some(descriptor)) = (&output_inner, self.0.descriptor()) {
+            output_inner
+                .declare_output_ports(descriptor.outputs.iter().map(|port| port.name.clone()));
+        }
         let input_inner =
             needs_inputs.then(|| Arc::new(crate::iceoryx2::InputMailboxesInner::new()));
 
@@ -219,6 +234,13 @@ pub(crate) struct UnregisteredProcessorTypeRecord {
     descriptor: Option<ProcessorDescriptor>,
 }
 
+/// Registers a processor type the registry has never seen, given only its
+/// class import path. The wheel installs one that imports the class in the app
+/// process and registers it exactly as `rt.add` does. Shared, because it runs
+/// outside the registry's locks: what it imports may itself register.
+pub type UnregisteredProcessorTypeResolverFn =
+    Arc<dyn Fn(&ProcessorClassImportPath) -> Result<()> + Send + Sync>;
+
 /// Factory for compile-time registered Rust processors.
 ///
 /// Keyed on the import path of the class each processor is — the same string
@@ -231,6 +253,7 @@ pub(crate) struct UnregisteredProcessorTypeRecord {
 /// insert, taking `port_info` and `registrations` inside. Anything that needs
 /// two of these three must take them in that order.
 pub struct ProcessorInstanceFactory {
+    unregistered_type_resolver: RwLock<Option<UnregisteredProcessorTypeResolverFn>>,
     registrations: RwLock<HashMap<ProcessorClassImportPath, RegistrationKind>>,
     port_info: RwLock<HashMap<ProcessorClassImportPath, (Vec<PortInfo>, Vec<PortInfo>)>>,
     descriptors: RwLock<HashMap<ProcessorClassImportPath, ProcessorDescriptor>>,
@@ -256,6 +279,7 @@ impl Default for ProcessorInstanceFactory {
 impl ProcessorInstanceFactory {
     pub fn new() -> Self {
         Self {
+            unregistered_type_resolver: RwLock::new(None),
             registrations: RwLock::new(HashMap::new()),
             port_info: RwLock::new(HashMap::new()),
             descriptors: RwLock::new(HashMap::new()),
@@ -410,6 +434,31 @@ impl ProcessorInstanceFactory {
         );
 
         Ok(())
+    }
+
+    /// Install the resolver consulted when an add names a type nobody registered.
+    pub fn set_unregistered_processor_type_resolver(
+        &self,
+        resolver: UnregisteredProcessorTypeResolverFn,
+    ) {
+        *self.unregistered_type_resolver.write() = Some(resolver);
+    }
+
+    /// Register `processor_class_import_path` through the installed resolver when
+    /// it is unknown. With no resolver an unknown type stays unknown, so the add
+    /// fails exactly as it did before a resolver existed.
+    pub fn resolve_processor_type_if_unregistered(
+        &self,
+        processor_class_import_path: &ProcessorClassImportPath,
+    ) -> Result<()> {
+        if self.is_registered(processor_class_import_path) {
+            return Ok(());
+        }
+        let resolver = self.unregistered_type_resolver.read().clone();
+        match resolver {
+            Some(resolve) => resolve(processor_class_import_path),
+            None => Ok(()),
+        }
     }
 
     /// Remove every registry entry for the given processor types across
@@ -758,5 +807,45 @@ mod tests {
         assert!(factory.port_info(&never_registered).is_none());
         assert!(!factory.is_registered(&never_registered));
         assert!(!factory.can_create(&never_registered));
+    }
+
+    #[test]
+    fn an_unknown_type_is_registered_through_the_installed_resolver_and_only_then() {
+        let factory = Arc::new(ProcessorInstanceFactory::new());
+        let path = ProcessorClassImportPath::new("agent_effects.grayscale:GrayscaleEffect")
+            .expect("the fixture path names a class");
+
+        factory
+            .resolve_processor_type_if_unregistered(&path)
+            .expect("no resolver installed means nothing to do, not an error");
+        assert!(!factory.is_registered(&path));
+
+        let resolver_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = Arc::clone(&resolver_calls);
+        let registry_the_resolver_fills = Arc::clone(&factory);
+        factory.set_unregistered_processor_type_resolver(Arc::new(move |asked| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            registry_the_resolver_fills.register_dynamic(
+                descriptor_for(asked.as_str()),
+                Box::new(|_node| {
+                    Err(Error::NotSupported(
+                        "this test never constructs the processor".into(),
+                    ))
+                }),
+            )
+        }));
+
+        factory
+            .resolve_processor_type_if_unregistered(&path)
+            .expect("the resolver registers the type");
+        assert!(factory.is_registered(&path));
+        factory
+            .resolve_processor_type_if_unregistered(&path)
+            .expect("a registered type needs no resolving");
+        assert_eq!(
+            resolver_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the resolver runs once for the miss and never for a registered type"
+        );
     }
 }

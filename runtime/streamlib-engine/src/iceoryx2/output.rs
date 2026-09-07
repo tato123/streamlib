@@ -20,7 +20,7 @@
 //! [`OutputWriterInner::set_channel_publisher`] and
 //! [`OutputWriterInner::add_channel_link`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
@@ -137,6 +137,9 @@ pub struct ChannelEgressConfig {
 pub struct OutputWriterInner {
     /// Map from source output port name to its channel egress.
     channels: Mutex<HashMap<String, ChannelEgress>>,
+    /// The output ports the processor declared. A write to one of these that
+    /// has no channel yet is a drop; a write to any other name is a refusal.
+    declared_output_ports: Mutex<HashSet<String>>,
 }
 
 // OutputWriterInner is Send + Sync via Mutex.
@@ -148,7 +151,14 @@ impl OutputWriterInner {
     pub fn new() -> Self {
         Self {
             channels: Mutex::new(HashMap::new()),
+            declared_output_ports: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Name the output ports the processor declared, so a write to one that
+    /// no link has reached yet is dropped rather than refused.
+    pub fn declare_output_ports(&self, port_names: impl IntoIterator<Item = String>) {
+        self.declared_output_ports.lock().extend(port_names);
     }
 
     /// Whether a channel publisher has already been installed for this output
@@ -267,9 +277,16 @@ impl OutputWriterInner {
     /// signalled.
     pub fn write_raw(&self, port: &str, data: &[u8], timestamp_ns: i64) -> Result<()> {
         let mut channels = self.channels.lock();
-        let egress = channels
-            .get_mut(port)
-            .ok_or_else(|| Error::Link(format!("Unknown output port: {}", port)))?;
+        let Some(egress) = channels.get_mut(port) else {
+            // A declared port no link has reached — a processor added to a
+            // running graph ahead of its connect, or one whose last link was
+            // taken away — carries nothing, so the bag is dropped as it would
+            // be for a consumer that cannot keep up.
+            if self.declared_output_ports.lock().contains(port) {
+                return Ok(());
+            }
+            return Err(Error::Link(format!("Unknown output port: {}", port)));
+        };
 
         let total_len = FRAME_HEADER_SIZE + data.len();
 
@@ -902,6 +919,28 @@ mod tests {
             !inner.has_channel_publisher("out"),
             "the publisher (and its data service) must be released after the final \
              disconnect so a reconnect recreates a fresh-sized service",
+        );
+    }
+
+    /// A declared output port with no link yet takes the bag and drops it,
+    /// the way a port whose consumer cannot keep up does; only a port the
+    /// processor never declared is refused. Mentally revert the declared
+    /// check and a processor added to a running graph fails every frame
+    /// until its output is connected.
+    #[test]
+    fn a_write_to_a_declared_but_unlinked_port_is_dropped_not_refused() {
+        let inner = OutputWriterInner::new();
+        inner.declare_output_ports(["video".to_string()]);
+
+        inner
+            .write_raw("video", b"data", 0)
+            .expect("a declared port with no link drops the bag");
+        assert!(!inner.has_port("video"), "dropping opens no channel");
+
+        let refused = inner.write_raw("undeclared", b"data", 0).unwrap_err();
+        assert!(
+            format!("{refused}").contains("Unknown output port"),
+            "an undeclared port is refused by name; got {refused}"
         );
     }
 

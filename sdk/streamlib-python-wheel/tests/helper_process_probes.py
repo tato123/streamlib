@@ -9,6 +9,8 @@ module it was declared in, and importing a pytest module would re-run the
 suite inside the child.
 """
 
+import time
+
 from streamlib import input, output, processor
 
 
@@ -49,3 +51,20 @@ class RefusesSetupProbe:
 
     def setup(self, ctx) -> None:
         raise RuntimeError("this processor cannot set itself up")
+
+
+@processor
+class SlowPassThroughProbe:
+    """Copies every bag to its output, slower than a burst arrives."""
+
+    @input(delivery_profile="newest")
+    def frames_from_upstream(self) -> None: ...
+
+    @output()
+    def frames_to_downstream(self) -> None: ...
+
+    def process(self, ctx) -> None:
+        bag = ctx.inputs.read("frames_from_upstream")
+        if bag is not None:
+            time.sleep(0.005)
+            ctx.outputs.write("frames_to_downstream", bag)

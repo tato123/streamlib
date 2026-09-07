@@ -25,6 +25,9 @@ pub struct Compiler {
     graph: Arc<RwLock<Graph>>,
     // Transaction accumulates operations until commit
     transaction: Arc<Mutex<Vec<PendingOperation>>>,
+    /// Held for the whole of a commit: two batches compiling at once would
+    /// interleave their spawn and wire phases against one graph.
+    one_commit_at_a_time: Mutex<()>,
 }
 
 impl Default for Compiler {
@@ -39,6 +42,7 @@ impl Compiler {
         Self {
             graph: Arc::new(RwLock::new(Graph::new())),
             transaction: Arc::new(Mutex::new(Vec::new())),
+            one_commit_at_a_time: Mutex::new(()),
         }
     }
 
@@ -56,9 +60,17 @@ impl Compiler {
         f(&mut graph, &tx)
     }
 
+    /// The operations logged and not yet committed, in the order they were
+    /// logged.
+    #[cfg(test)]
+    pub(crate) fn logged_pending_operations(&self) -> Vec<PendingOperation> {
+        self.transaction.lock().clone()
+    }
+
     /// Flush transaction. Callable from any thread - compile() is dispatched to main thread.
     #[tracing::instrument(name = "compiler.commit", skip_all)]
     pub fn commit(&self, runtime_ctx: &Arc<RuntimeContext>) -> Result<()> {
+        let _one_commit_at_a_time = self.one_commit_at_a_time.lock();
         let operations = std::mem::take(&mut *self.transaction.lock());
         if operations.is_empty() {
             tracing::info!("[commit] No pending operations");

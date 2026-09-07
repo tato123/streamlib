@@ -80,10 +80,10 @@ consumer's view of a payload. A cast type that claims its surface is also the
 tensor-protocol producer for that frame. _Avoid_: "typed bag", "frame object" (a cast
 type need not be a frame).
 
-**Control plane**: the HTTP/WebSocket/MCP surface a runtime hosts for observing and
-inspecting running nodes; the CLI is its client. Embedding happens by importing the
-wheel, never through the control plane. _Avoid_: "API server" as the concept (that is
-the component hosting it).
+**Control plane**: the HTTP/WebSocket/MCP surface a runtime hosts for observing,
+inspecting and changing the live graph of running nodes; the CLI is its client.
+Embedding happens by importing the wheel, never through the control plane. _Avoid_:
+"API server" as the concept (that is the component hosting it).
 
 **Node**: a live runtime reachable over its control plane; discovered via the per-user
 on-disk registry. _Avoid_: "instance", "server".

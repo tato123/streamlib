@@ -15,6 +15,7 @@ import socket
 import struct
 import threading
 import time
+from typing import cast
 
 import pytest
 
@@ -156,6 +157,30 @@ def engine_shaped_link_wiring(direction: str, link_id: str) -> dict:
         "max_subscribers": 2,
         "notify_max_notifiers": 1,
     }
+
+
+def test_a_declared_port_with_no_link_reads_empty_and_drops_writes():
+    """A processor added to a running graph is set up before any link reaches
+    it, and a link may be taken away again later. Its declared ports stay
+    usable throughout: a read finds nothing, a write goes nowhere, and neither
+    raises. Only a port the class never declared is refused, by name.
+
+    Fail-without-fix: without the declaration the write below raises on every
+    frame a live-added effect sees before its output is connected.
+    """
+    from streamlib import ProcessorLinkDataAccess
+
+    link_data_access = ProcessorLinkDataAccess()
+    link_data_access.declare_ports(["frames_from_upstream"], ["frames_to_downstream"])
+
+    assert link_data_access.read_from_input_port("frames_from_upstream") is None
+    assert link_data_access.input_port_has_data("frames_from_upstream") is False
+    link_data_access.write_to_output_port("frames_to_downstream", {"frame_index": 1})
+
+    with pytest.raises(RuntimeError, match="never_declared"):
+        link_data_access.read_from_input_port("never_declared")
+    with pytest.raises(RuntimeError, match="never_declared"):
+        link_data_access.write_to_output_port("never_declared", {"frame_index": 1})
 
 
 def test_a_helper_opens_its_own_ports_from_the_envelope_the_engine_sends():
@@ -568,6 +593,187 @@ def test_an_unknown_lifecycle_command_is_survived(stand_in_parent):
     )
 
     stand_in_parent.send({"cmd": "reticulate_splines"})
+    stand_in_parent.send({"cmd": "teardown", "capability": "full"})
+    assert stand_in_parent.receive()["rpc"] == "done"
+    lifecycle_thread.join(timeout=5.0)
+    assert not lifecycle_thread.is_alive()
+
+
+def test_a_link_wired_after_setup_opens_its_port_mid_run(stand_in_parent):
+    """A processor added to a running graph is set up with no links and gets
+    its first ones from later connects. The engine hands each one over as a
+    `wire_link` the child acts on from inside its execution loop — parked on
+    the parent, because with no input it has nothing else to wait on — and
+    bags then cross both new links.
+
+    Fail-without-fix: drop the `wire_link` arm from `_dispatch` and the child
+    logs an unknown command, its input never opens, and the bag published
+    below never comes back.
+    """
+    from streamlib import ProcessorLinkDataAccess
+
+    bridge = ParentProcessBridge(stand_in_parent.child_end)
+    bridge.start_reading()
+    lifecycle_thread = drive_lifecycle_on_a_thread(
+        bridge, load_processor_class(f"{PROBE_MODULE}:PassThroughProbe")
+    )
+
+    stand_in_parent.send({"cmd": "setup", "capability": "full", "config": {}, "ports": {}})
+    assert stand_in_parent.receive()["rpc"] == "ready"
+    stand_in_parent.send({"cmd": "run", "execution": "reactive", "interval_ms": 0})
+
+    inbound_link_id = "L-wired-late-in"
+    outbound_link_id = "L-wired-late-out"
+    # The far end of the child's output is opened first, so nothing the child
+    # publishes is dropped for want of a subscriber.
+    downstream = ProcessorLinkDataAccess()
+    _helper.wire_link_data_access(
+        downstream,
+        {"inputs": [engine_shaped_link_wiring("input", outbound_link_id)]},
+    )
+    stand_in_parent.send(
+        {
+            "cmd": "wire_link",
+            "direction": "output",
+            "link": engine_shaped_link_wiring("output", outbound_link_id),
+        }
+    )
+    stand_in_parent.send(
+        {
+            "cmd": "wire_link",
+            "direction": "input",
+            "link": engine_shaped_link_wiring("input", inbound_link_id),
+        }
+    )
+    upstream = ProcessorLinkDataAccess()
+    _helper.wire_link_data_access(
+        upstream,
+        {"outputs": [engine_shaped_link_wiring("output", inbound_link_id)]},
+    )
+
+    # A bag published before the child's subscriber is up is dropped by the
+    # channel, and nothing announces when the child has acted on the wire, so
+    # publish until one comes back.
+    deadline = time.monotonic() + 10.0
+    forwarded = None
+    while forwarded is None and time.monotonic() < deadline:
+        upstream.write_to_output_port("frames_to_downstream", {"frame_index": 7})
+        time.sleep(0.05)
+        if downstream.any_input_port_has_data():
+            forwarded = downstream.read_from_input_port("frames_from_upstream")
+    assert forwarded == {"frame_index": 7, "tag": "untagged"}, (
+        "a bag must cross the input wired after setup and come back over the "
+        "output wired after setup"
+    )
+
+    stand_in_parent.send({"cmd": "teardown", "capability": "full"})
+    assert stand_in_parent.receive()["rpc"] == "done", (
+        "an unanswered wire must leave the next command's reply the next thing "
+        "the parent reads"
+    )
+    lifecycle_thread.join(timeout=5.0)
+    assert not lifecycle_thread.is_alive()
+
+
+class _CountingLinkDataAccess:
+    """Forwards to the real data plane and counts the loop's listener drains."""
+
+    def __init__(self, real) -> None:
+        self._real = real
+        self.drain_calls = 0
+
+    def drain_input_listener(self) -> None:
+        self.drain_calls += 1
+        self._real.drain_input_listener()
+
+    def __getattr__(self, name: str):
+        return getattr(self._real, name)
+
+
+def test_a_helper_that_cannot_keep_up_still_drains_its_listener_every_pass(stand_in_parent):
+    """A processor slower than its upstream never goes idle, so a loop that
+    drains only when idle leaves the listener's datagram socket to fill within
+    seconds — after which every upstream notify fails and is logged, one
+    warning per frame for the rest of the run. The drain has to happen on
+    every pass.
+
+    Fail-without-fix: move the drain back under the idle branch and the burst
+    below is processed with a drain or two at most, all after it ended.
+    """
+    from streamlib import ProcessorLinkDataAccess
+
+    bridge = ParentProcessBridge(stand_in_parent.child_end)
+    bridge.start_reading()
+    lifecycle_holder: "list[HelperProcessLifecycle]" = []
+
+    def drive() -> None:
+        lifecycle = HelperProcessLifecycle(
+            bridge,
+            load_processor_class(f"{PROBE_MODULE}:SlowPassThroughProbe"),
+            "R-helper-test",
+            "P-helper-test",
+            ProcessorLinkDataAccess(),
+        )
+        lifecycle_holder.append(lifecycle)
+        lifecycle.run_until_the_parent_is_done()
+
+    lifecycle_thread = threading.Thread(target=drive, name="helper-lifecycle")
+    lifecycle_thread.start()
+
+    inbound_link_id = "L-slow-in"
+    outbound_link_id = "L-slow-out"
+    downstream = ProcessorLinkDataAccess()
+    _helper.wire_link_data_access(
+        downstream,
+        {"inputs": [engine_shaped_link_wiring("input", outbound_link_id)]},
+    )
+    stand_in_parent.send(
+        {
+            "cmd": "setup",
+            "capability": "full",
+            "config": {},
+            "ports": {
+                "inputs": [engine_shaped_link_wiring("input", inbound_link_id)],
+                "outputs": [engine_shaped_link_wiring("output", outbound_link_id)],
+            },
+        }
+    )
+    assert stand_in_parent.receive()["rpc"] == "ready"
+    # Swapped in after setup, which handed the real object to the engine's
+    # context; from here on only the loop reads it.
+    (lifecycle,) = lifecycle_holder
+    counting = _CountingLinkDataAccess(lifecycle._link_data_access)
+    # A duck-typed stand-in: the loop only ever calls methods on it.
+    lifecycle._link_data_access = cast(ProcessorLinkDataAccess, counting)
+    stand_in_parent.send({"cmd": "run", "execution": "reactive", "interval_ms": 0})
+
+    upstream = ProcessorLinkDataAccess()
+    _helper.wire_link_data_access(
+        upstream,
+        {"outputs": [engine_shaped_link_wiring("output", inbound_link_id)]},
+    )
+    # Faster than the probe processes, so its input never runs dry during the
+    # burst and the loop never reaches its idle branch.
+    for index in range(80):
+        upstream.write_to_output_port("frames_to_downstream", {"frame_index": index})
+        time.sleep(0.001)
+
+    forwarded = 0
+    quiet_since = time.monotonic()
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and time.monotonic() - quiet_since < 0.3:
+        if downstream.any_input_port_has_data():
+            if downstream.read_from_input_port("frames_from_upstream") is not None:
+                forwarded += 1
+                quiet_since = time.monotonic()
+            continue
+        time.sleep(0.01)
+    assert forwarded >= 8, f"the probe forwarded only {forwarded} bags of the burst"
+    assert counting.drain_calls >= 8, (
+        f"the listener was drained {counting.drain_calls} times while {forwarded} bags "
+        f"were processed back to back — it must be drained on every pass"
+    )
+
     stand_in_parent.send({"cmd": "teardown", "capability": "full"})
     assert stand_in_parent.receive()["rpc"] == "done"
     lifecycle_thread.join(timeout=5.0)

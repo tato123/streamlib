@@ -161,7 +161,7 @@ Add `--url http://<host>:9000` to any of these and you're debugging the rig inst
 ```console
 $ streamlib nodes
 RUNTIME_ID                 CONTROL_URL            PID  ALIVE?  HINT
-Rq1w8xk3m2v0pz7ny4tbd6hsf  http://0.0.0.0:9000  48212  yes     streamlib (/home/you/my-rig)
+Rq1w8xk3m2v0pz7ny4tbd6hsf  http://127.0.0.1:9000  48212  yes     streamlib (/home/you/my-rig)
 
 $ streamlib tap CameraSource/video --count 3
 {"channel": "CameraSource/video", "requested": 3, "window_ms": 500, "dropped_bags": 0,
@@ -179,17 +179,21 @@ rather than off an offline pipeline that has already drifted from it.
 
 <br>
 
-```json
-{"mcpServers": {"streamlib": {"type": "http", "url": "http://rig-04:9000/mcp"}}}
+```console
+$ claude mcp add --transport http streamlib http://127.0.0.1:9000/mcp
 ```
 
 Served at `POST /mcp`, mounted with the node and sharing its lifecycle — there is no bridge
-process to run. The tools are `graph`, `tap`, `logs`, and `shutdown`. Nothing on that surface
-mutates the graph: the pipeline is defined by the code on the device, so what you read off a
-machine always matches your source. The CLI is a pure client of exactly this surface.
+process to run; `streamlib nodes` prints the URL a running node actually bound. The tools are
+`graph`, `tap`, `logs`, `exchange` and `shutdown` to observe, and `add_processor`, `connect`,
+`disconnect` and `remove_processor` to change the running graph: an agent writes a processor
+class into a module beside `app.py` — or `pip install`s one — names it to the node by its
+`module:ClassName` path, and splices it into the live pipeline. The class runs in its own
+helper process like every other. The CLI is a pure client of exactly this surface.
 
-**It costs you** an unauthenticated port. A node binds all interfaces and does not authenticate
-callers — narrow it with `--host` on any network you don't control.
+**It costs you** an unauthenticated port that can now rewire the graph. A node binds all
+interfaces and does not authenticate callers — narrow it with `--host` on any network you
+don't control.
 
 </details>
 

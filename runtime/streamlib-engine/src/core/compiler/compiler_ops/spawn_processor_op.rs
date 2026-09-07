@@ -185,6 +185,7 @@ fn spawn_dedicated_thread(
         .spawn(move || {
             let current_thread = std::thread::current();
             let thread_id = current_thread.id();
+            crate::core::runtime::mark_this_thread_as_a_processor_execution_thread();
 
             tracing::info!("[{}] Thread started: id={:?}", proc_id_clone, thread_id);
 

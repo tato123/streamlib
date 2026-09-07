@@ -15,6 +15,7 @@
 //! engine's discipline, so a child must create and drive all of them from one
 //! thread.
 
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
@@ -46,6 +47,11 @@ pub(crate) struct PythonProcessorLinkDataAccess {
     /// itself. The parent's copy is wired by the compiler op and leaves this
     /// empty — the node it would name belongs to the engine.
     iceoryx2_node: OnceLock<Iceoryx2Node>,
+    /// The ports the processor class declared. A declared port no link has
+    /// reached reads as empty and swallows writes; an undeclared name is
+    /// refused.
+    declared_input_ports: parking_lot::Mutex<HashSet<String>>,
+    declared_output_ports: parking_lot::Mutex<HashSet<String>>,
 }
 
 impl PythonProcessorLinkDataAccess {
@@ -54,6 +60,33 @@ impl PythonProcessorLinkDataAccess {
             input_mailboxes: OnceLock::new(),
             output_writer: OnceLock::new(),
             iceoryx2_node: OnceLock::new(),
+            declared_input_ports: parking_lot::Mutex::new(HashSet::new()),
+            declared_output_ports: parking_lot::Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// The mailboxes `port_name` reads from; `None` for a declared input port
+    /// no link has reached yet, which reads as empty rather than as an error.
+    fn input_mailboxes_reaching(
+        &self,
+        port_name: &str,
+    ) -> PyResult<Option<&Arc<InputMailboxesInner>>> {
+        match self.input_mailboxes.get() {
+            Some(input_mailboxes) if input_mailboxes.has_port(port_name) => {
+                Ok(Some(input_mailboxes))
+            }
+            _ if self.declared_input_ports.lock().contains(port_name) => Ok(None),
+            _ => Err(unwired_port_error("input", port_name)),
+        }
+    }
+
+    /// The writer `port_name` publishes through; `None` for a declared output
+    /// port no link has reached yet, whose bags go nowhere rather than raising.
+    fn output_writer_reaching(&self, port_name: &str) -> PyResult<Option<&Arc<OutputWriterInner>>> {
+        match self.output_writer.get() {
+            Some(output_writer) if output_writer.has_port(port_name) => Ok(Some(output_writer)),
+            _ if self.declared_output_ports.lock().contains(port_name) => Ok(None),
+            _ => Err(unwired_port_error("output", port_name)),
         }
     }
 
@@ -83,8 +116,8 @@ impl PythonProcessorLinkDataAccess {
         into: Option<&Bound<'py, PyAny>>,
         offered_gpu_limited_access: Option<&Bound<'py, PythonGpuContextLimitedAccess>>,
     ) -> PyResult<Option<Bound<'py, PyAny>>> {
-        let Some(input_mailboxes) = self.input_mailboxes.get() else {
-            return Err(unwired_port_error("input", port_name));
+        let Some(input_mailboxes) = self.input_mailboxes_reaching(port_name)? else {
+            return Ok(None);
         };
         let read = python
             .detach(|| input_mailboxes.read_raw(port_name))
@@ -136,8 +169,8 @@ impl PythonProcessorLinkDataAccess {
         into: Option<&Bound<'py, PyAny>>,
         offered_gpu_limited_access: Option<&Bound<'py, PythonGpuContextLimitedAccess>>,
     ) -> PyResult<Option<(Bound<'py, PyAny>, String, i64)>> {
-        let Some(input_mailboxes) = self.input_mailboxes.get() else {
-            return Err(unwired_port_error("input", port_name));
+        let Some(input_mailboxes) = self.input_mailboxes_reaching(port_name)? else {
+            return Ok(None);
         };
         let read = python
             .detach(|| input_mailboxes.read_raw_from_inbound_link(port_name))
@@ -471,8 +504,8 @@ impl PythonProcessorLinkDataAccess {
         python: Python<'py>,
         port_name: &str,
     ) -> PyResult<(Option<Bound<'py, PyAny>>, Option<i64>)> {
-        let Some(input_mailboxes) = self.input_mailboxes.get() else {
-            return Err(unwired_port_error("input", port_name));
+        let Some(input_mailboxes) = self.input_mailboxes_reaching(port_name)? else {
+            return Ok((None, None));
         };
         let read = python
             .detach(|| input_mailboxes.read_raw(port_name))
@@ -492,10 +525,21 @@ impl PythonProcessorLinkDataAccess {
         python: Python<'_>,
         port_name: &str,
     ) -> PyResult<bool> {
-        let Some(input_mailboxes) = self.input_mailboxes.get() else {
-            return Err(unwired_port_error("input", port_name));
+        let Some(input_mailboxes) = self.input_mailboxes_reaching(port_name)? else {
+            return Ok(false);
         };
         Ok(python.detach(|| input_mailboxes.has_data(port_name)))
+    }
+
+    /// Name the ports the processor class declared, ahead of any wiring.
+    ///
+    /// A declared port that no link has reached — a processor added to a
+    /// running graph before its connects, or one whose last link was taken
+    /// away — reads as empty and drops what is written to it; only a name the
+    /// class never declared is refused.
+    fn declare_ports(&self, input_port_names: Vec<String>, output_port_names: Vec<String>) {
+        self.declared_input_ports.lock().extend(input_port_names);
+        self.declared_output_ports.lock().extend(output_port_names);
     }
 
     /// Publish one bag to every downstream link on `port_name`.
@@ -510,8 +554,8 @@ impl PythonProcessorLinkDataAccess {
         bag: &Bound<'_, PyAny>,
         timestamp_ns: Option<i64>,
     ) -> PyResult<()> {
-        let Some(output_writer) = self.output_writer.get() else {
-            return Err(unwired_port_error("output", port_name));
+        let Some(output_writer) = self.output_writer_reaching(port_name)? else {
+            return Ok(());
         };
         let encoded = encode_bag_to_msgpack(bag)?;
         let timestamp_ns = timestamp_ns.unwrap_or_else(|| monotonic_clock_now_ns() as i64);
@@ -906,7 +950,7 @@ fn not_a_helper_process_data_plane_error() -> PyErr {
 
 fn unwired_port_error(direction: &str, port_name: &str) -> PyErr {
     PyRuntimeError::new_err(format!(
-        "{direction} port {port_name:?} is not wired: this processor declared no {direction} \
-         ports, so the engine allocated no links for it"
+        "{direction} port {port_name:?} is not one this processor declared, so no link \
+         can reach it"
     ))
 }

@@ -576,11 +576,32 @@ class HelperProcessLifecycle:
             # wait, and a reply nobody reads becomes the answer to whatever it
             # sends next.
             self._unwire_link(command)
+        elif verb == "wire_link":
+            # A link the engine wired after `setup` read the envelope; unanswered
+            # for the same reason `unwire_link` is.
+            self._wire_link(command)
         else:
             log.warn("the parent sent an unknown lifecycle command", cmd=verb)
 
     def _setup(self, command: "dict[str, Any]") -> None:
         try:
+            # Declared ahead of any wiring: a processor added to a running
+            # graph has ports before it has links, and reads and writes on
+            # them must not raise in between.
+            self._link_data_access.declare_ports(
+                [
+                    port["name"]
+                    for port in getattr(
+                        self._processor_class, "__streamlib_processor_input_ports__", []
+                    )
+                ],
+                [
+                    port["name"]
+                    for port in getattr(
+                        self._processor_class, "__streamlib_processor_output_ports__", []
+                    )
+                ],
+            )
             wire_link_data_access(self._link_data_access, command.get("ports") or {})
             self._hosted = construct_hosted_processor(
                 self._processor_class,
@@ -622,6 +643,11 @@ class HelperProcessLifecycle:
         assert self._hosted is not None
         while self._running and not self._torn_down:
             if self._link_data_access.any_input_port_has_data():
+                # Drained on every pass, not only when idle: a processor that
+                # runs slower than its upstream never reaches the wait below,
+                # and a listener nobody drains fills its socket within seconds,
+                # after which every upstream notify fails and is logged.
+                self._link_data_access.drain_input_listener()
                 self._hosted.call_hook("process", self._hosted.limited_access_context)
                 self._drain_commands_arriving_mid_run()
                 continue
@@ -715,6 +741,32 @@ class HelperProcessLifecycle:
                 "this processor could not release a disconnected link's port",
                 link_id=command.get("link_id"),
                 error=str(unwire_failure),
+            )
+
+    def _wire_link(self, command: "dict[str, Any]") -> None:
+        direction = command.get("direction")
+        link = command.get("link") or {}
+        if direction == "input":
+            port_wiring = {"inputs": [link]}
+        elif direction == "output":
+            port_wiring = {"outputs": [link]}
+        else:
+            log.warn(
+                "the parent asked to wire a link in an unknown direction",
+                direction=direction,
+                link_id=link.get("link_id"),
+            )
+            return
+        try:
+            wire_link_data_access(self._link_data_access, port_wiring)
+        except Exception as wire_failure:
+            # The engine already reports the link wired; without its port here
+            # this processor never sees a bag on it, so the failure is named.
+            log.error(
+                "this processor could not open its port for a link wired after setup",
+                link_id=link.get("link_id"),
+                direction=direction,
+                error=str(wire_failure),
             )
 
     def _update_config(self, command: "dict[str, Any]") -> None:
