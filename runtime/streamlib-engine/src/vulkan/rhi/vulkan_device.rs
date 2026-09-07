@@ -3633,6 +3633,11 @@ impl HostVulkanDevice {
     /// Uses raw `vkAllocateMemory` with `VkImportMemoryFdInfoKHR` since VMA
     /// does not support importing external memory from file descriptors.
     /// All non-import allocations go through VMA.
+    ///
+    /// The fd is the driver's from this call on, whatever it returns. The
+    /// spec transfers ownership on success; the NVIDIA driver also closes
+    /// the fd on a failed import, so a caller that closes after a failure
+    /// closes whatever the kernel has since handed that number to.
     pub fn import_dma_buf_memory(
         &self,
         fd: i32,

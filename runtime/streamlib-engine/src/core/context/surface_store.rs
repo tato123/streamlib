@@ -224,8 +224,8 @@ fn keep_only_the_plane_fds(response: &serde_json::Value, reply_fds: &mut Vec<Own
 }
 
 /// Release the plane fds to the pixel-buffer import about to take them,
-/// which owns each one from here: the driver's behind a successful import,
-/// closed on a failed one.
+/// which owns each one from here: handed to the driver at its import, or
+/// closed before that.
 #[cfg(target_os = "linux")]
 fn leave_plane_fds_to_the_import(plane_fds: Vec<OwnedFd>) {
     use std::os::fd::IntoRawFd as _;

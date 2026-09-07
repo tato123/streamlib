@@ -152,9 +152,9 @@ impl RhiPixelBufferImport for super::PixelBuffer {
 
     /// Import one DMA-BUF fd per plane.
     ///
-    /// Consumes every plane fd: the driver owns each one behind a
-    /// successful import and every other exit closes it, so the caller
-    /// holds nothing after the call whatever its outcome.
+    /// Consumes every plane fd: each is handed to the driver at its
+    /// import or closed here before that, so the caller holds nothing
+    /// after the call whatever its outcome.
     fn from_external_plane_handles(
         handles: &[RhiExternalHandle],
         width: u32,

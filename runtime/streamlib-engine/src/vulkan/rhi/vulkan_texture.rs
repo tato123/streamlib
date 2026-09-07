@@ -1506,10 +1506,11 @@ impl HostVulkanTexture {
 
     /// Import a texture from a DMA-BUF file descriptor.
     ///
-    /// Takes the fd by value because after this call exactly one party owns
-    /// it: the driver, once `vkAllocateMemory` has imported it, or nobody —
-    /// it is closed on every exit before that point, and a failure after it
-    /// frees the memory the driver closes it with.
+    /// Takes the fd by value because the caller holds nothing after this
+    /// returns: the fd is handed to the driver at `vkAllocateMemory` — the
+    /// driver's from then on, whatever that call returned (see
+    /// [`HostVulkanDevice::import_dma_buf_memory`]) — or closed here on an
+    /// exit before that point.
     pub fn from_dma_buf_fd(
         vulkan_device: &Arc<HostVulkanDevice>,
         dma_buf_fd: std::os::fd::OwnedFd,
@@ -1518,7 +1519,7 @@ impl HostVulkanTexture {
         format: TextureFormat,
         allocation_size: vk::DeviceSize,
     ) -> Result<Self> {
-        use std::os::fd::{AsRawFd as _, IntoRawFd as _};
+        use std::os::fd::IntoRawFd as _;
 
         let device = vulkan_device.device();
         let vk_format = texture_format_to_vk(format);
@@ -1553,21 +1554,17 @@ impl HostVulkanTexture {
         let alloc_size = allocation_size.max(mem_requirements.size);
 
         // VMA cannot import external memory — use raw import path in the RHI
-        let memory = match vulkan_device.import_dma_buf_memory(
-            dma_buf_fd.as_raw_fd(),
-            alloc_size,
-            mem_requirements.memory_type_bits,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-        ) {
-            Ok(memory) => {
-                let _ = dma_buf_fd.into_raw_fd();
-                memory
-            }
-            Err(e) => {
+        let memory = vulkan_device
+            .import_dma_buf_memory(
+                dma_buf_fd.into_raw_fd(),
+                alloc_size,
+                mem_requirements.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .map_err(|e| {
                 unsafe { device.destroy_image(image, None) };
-                return Err(e);
-            }
-        };
+                e
+            })?;
 
         unsafe { device.bind_image_memory(image, memory, 0) }
             .map(|_| ())
@@ -1750,18 +1747,19 @@ mod tests {
         Some(unsafe { file_status.assume_init() }.st_ino as u64)
     }
 
-    /// The device-side half of the lookup's fd contract: an import the
-    /// driver refuses leaves the fd to nobody, so the importer closes it.
-    /// A 4 KB buffer's DMA-BUF cannot back a 16 MB image allocation, and
-    /// the driver must say so at `vkAllocateMemory` — before it owns the
-    /// fd.
+    /// The device-side half of the lookup's fd contract. A 4 KB buffer's
+    /// DMA-BUF cannot back a 16 MB image allocation, so the driver refuses
+    /// at `vkAllocateMemory` — and closes the fd as it does (NVIDIA), which
+    /// is why the importer must not close it again: in a debug build a
+    /// second close of an `OwnedFd` is an IO-safety abort of this very
+    /// test binary. Nothing may be left open, and nothing closed twice.
     #[cfg(target_os = "linux")]
     #[cfg_attr(
         not(feature = "hardware-tests"),
         ignore = "hardware integration — set --features streamlib/hardware-tests + run with --test-threads=1. See docs/testing-hardware.md"
     )]
     #[test]
-    fn a_texture_import_the_driver_refuses_closes_the_fd_it_was_handed() {
+    fn a_texture_import_the_driver_refuses_leaves_no_fd_behind_and_closes_none_twice() {
         use std::os::fd::{FromRawFd as _, OwnedFd};
 
         let device = match HostVulkanDevice::new() {

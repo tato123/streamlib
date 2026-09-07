@@ -933,11 +933,13 @@ impl HostVulkanBuffer {
     /// the given DMA-BUF fds. `plane_sizes[i]` must be the non-zero
     /// allocation size of plane `i`.
     ///
-    /// Takes the fds by value because by the time this returns every one
-    /// of them has exactly one fate: owned by the driver behind a plane
-    /// that imported, or closed. If plane N fails, planes 0..N are torn
-    /// down (the driver closes their fds with the memory) and the fds of
-    /// plane N and after are closed here — the caller holds nothing.
+    /// Takes the fds by value because the caller holds nothing after this
+    /// returns: each fd is either handed to the driver at its plane's
+    /// `vkAllocateMemory` — the driver's from then on, whatever that call
+    /// returned (see [`HostVulkanDevice::import_dma_buf_memory`]) — or
+    /// closed here on an exit before that point. If plane N fails, planes
+    /// 0..N are torn down with their memory and the fds of the planes
+    /// after N are closed here.
     #[tracing::instrument(level = "trace", skip(vulkan_device, dma_buf_fds, plane_sizes), fields(plane_count = dma_buf_fds.len()))]
     pub fn from_dma_buf_fds(
         vulkan_device: &Arc<HostVulkanDevice>,
@@ -1019,8 +1021,8 @@ impl HostVulkanBuffer {
     /// [`crate::core::rhi::PixelBuffer`] receives synthetic dimensions
     /// (see [`Self::new_storage_buffer_host_visible`] for the convention).
     ///
-    /// Same fd ownership as [`Self::from_dma_buf_fds`]: the driver owns
-    /// the fd behind a successful import and every other exit closes it.
+    /// Same fd ownership as [`Self::from_dma_buf_fds`]: the driver's from
+    /// its `vkAllocateMemory` on, closed here on any exit before that.
     #[tracing::instrument(level = "trace", skip(vulkan_device, dma_buf_fd), fields(size))]
     pub fn from_dma_buf_fd_as_storage_buffer(
         vulkan_device: &Arc<HostVulkanDevice>,
@@ -1193,7 +1195,7 @@ fn import_single_plane(
     dma_buf_fd: std::os::fd::OwnedFd,
     effective_size: vk::DeviceSize,
 ) -> Result<VulkanImportedPlane> {
-    use std::os::fd::{AsRawFd as _, IntoRawFd as _};
+    use std::os::fd::IntoRawFd as _;
 
     let device = vulkan_device.device();
 
@@ -1218,21 +1220,17 @@ fn import_single_plane(
     let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
     let alloc_size = effective_size.max(mem_requirements.size);
 
-    let memory = match vulkan_device.import_dma_buf_memory(
-        dma_buf_fd.as_raw_fd(),
-        alloc_size,
-        mem_requirements.memory_type_bits,
-        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-    ) {
-        Ok(memory) => {
-            let _ = dma_buf_fd.into_raw_fd();
-            memory
-        }
-        Err(e) => {
+    let memory = vulkan_device
+        .import_dma_buf_memory(
+            dma_buf_fd.into_raw_fd(),
+            alloc_size,
+            mem_requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+        .map_err(|e| {
             unsafe { device.destroy_buffer(buffer, None) };
-            return Err(e);
-        }
-    };
+            e
+        })?;
 
     unsafe { device.bind_buffer_memory(buffer, memory, 0) }.map_err(|e| {
         vulkan_device.free_imported_memory(memory);
