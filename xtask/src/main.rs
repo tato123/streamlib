@@ -509,6 +509,9 @@ fn run_local_ci_gates(workspace_root: &Path) -> Result<()> {
                 "core::graph::graph_readiness::tests::a_failure_without_a_reason_reports_the_state_alone",
                 "core::context::gpu_context::tests::an_owned_color_converter_shares_no_kernel_with_the_cached_one",
                 "core::color::matrix::tests::identity_rgb_to_yuv_is_a_pass_through",
+                "core::context::surface_store::fd_ownership_tests::a_texture_lookup_of_a_pixel_buffer_slot_is_refused_and_closes_the_plane_it_received",
+                "core::context::surface_store::fd_ownership_tests::a_buffer_lookup_that_cannot_import_closes_the_planes_it_received",
+                "core::rhi::external_handle::tests::a_refused_opaque_fd_import_closes_every_plane_fd_it_was_handed",
             ],
         ),
         // The rig-tier integration binary that drives the two `match_device`

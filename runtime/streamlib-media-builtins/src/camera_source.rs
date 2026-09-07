@@ -678,7 +678,11 @@ fn capture_thread_loop(
                     }
                     break;
                 }
-                match full.import_dma_buf_storage_buffer(fd, input_alloc_size) {
+                // SAFETY: VIDIOC_EXPBUF minted this fd for us and nothing
+                // else holds it; the import owns it from here.
+                let dma_buf_fd =
+                    unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fd) };
+                match full.import_dma_buf_storage_buffer(dma_buf_fd, input_alloc_size) {
                     Ok(imported_buffer) => imported.push(imported_buffer),
                     Err(e) => {
                         if i == 0 {
@@ -700,7 +704,6 @@ fn capture_thread_loop(
                                 );
                             }
                         }
-                        unsafe { libc::close(fd) };
                         break;
                     }
                 }

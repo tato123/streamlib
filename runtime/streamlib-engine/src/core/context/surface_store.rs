@@ -146,6 +146,15 @@ const SURFACE_HANDLE_TYPE_DMA_BUF: &str = "dma_buf";
 #[cfg(target_os = "linux")]
 const SURFACE_HANDLE_TYPE_OPAQUE_FD: &str = "opaque_fd";
 
+/// Wire value of `resource_type` for a texture registration — the only
+/// kind a texture lookup imports.
+#[cfg(target_os = "linux")]
+const SURFACE_RESOURCE_TYPE_TEXTURE: &str = "texture";
+
+/// Wire value of `resource_type` for a pixel-buffer registration.
+#[cfg(target_os = "linux")]
+const SURFACE_RESOURCE_TYPE_PIXEL_BUFFER: &str = "pixel_buffer";
+
 /// Wrap each received fd as the external-handle flavour the surface-share
 /// service registered it under.
 ///
@@ -182,6 +191,46 @@ fn external_plane_handles_for_flavour(
             "check_out: surface registered with unknown handle type {unknown:?}; the wire \
              carries {SURFACE_HANDLE_TYPE_DMA_BUF:?} or {SURFACE_HANDLE_TYPE_OPAQUE_FD:?}"
         ))),
+    }
+}
+
+/// Adopt the fds a surface-share reply delivered over SCM_RIGHTS.
+///
+/// Each one landed in this process's table as a fresh descriptor that no
+/// other party closes, so adopting them the moment they arrive is what
+/// makes every exit of a lookup — a wire error, a refusal, a failed
+/// import — close them exactly once.
+#[cfg(target_os = "linux")]
+fn adopt_reply_fds(received_fds: Vec<std::os::fd::RawFd>) -> Vec<OwnedFd> {
+    received_fds
+        .into_iter()
+        // SAFETY: the kernel delivered these fds to this process with the
+        // reply and nothing else holds them.
+        .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
+        .collect()
+}
+
+/// Close the timeline edges a lookup reply appends after the plane fds.
+///
+/// The service announces each appended edge with a flag; a host-side
+/// lookup imports planes only.
+#[cfg(target_os = "linux")]
+fn keep_only_the_plane_fds(response: &serde_json::Value, reply_fds: &mut Vec<OwnedFd>) {
+    let appended_edges = ["has_produce_done_fd", "has_consume_done_fd"]
+        .iter()
+        .filter(|flag| response.get(*flag).and_then(serde_json::Value::as_bool) == Some(true))
+        .count();
+    reply_fds.truncate(reply_fds.len().saturating_sub(appended_edges));
+}
+
+/// Release the plane fds to the pixel-buffer import about to take them,
+/// which owns each one from here: the driver's behind a successful import,
+/// closed on a failed one.
+#[cfg(target_os = "linux")]
+fn leave_plane_fds_to_the_import(plane_fds: Vec<OwnedFd>) {
+    use std::os::fd::IntoRawFd as _;
+    for plane_fd in plane_fds {
+        let _ = plane_fd.into_raw_fd();
     }
 }
 
@@ -1135,18 +1184,17 @@ impl SurfaceStoreInner {
             streamlib_surface_client::MAX_DMA_BUF_PLANES,
         )
         .map_err(|e| Error::Configuration(format!("Unix socket check_out failed: {}", e)))?;
+        let mut plane_fds = adopt_reply_fds(received_fds);
 
         if let Some(error) = response
             .get("error")
             .and_then(|v: &serde_json::Value| v.as_str())
         {
-            for fd in &received_fds {
-                unsafe { libc::close(*fd) };
-            }
             return Err(Error::Configuration(format!("check_out: {}", error)));
         }
 
-        if received_fds.is_empty() {
+        keep_only_the_plane_fds(&response, &mut plane_fds);
+        if plane_fds.is_empty() {
             return Err(Error::Configuration(
                 "check_out: no DMA-BUF fd in response".into(),
             ));
@@ -1162,28 +1210,20 @@ impl SurfaceStoreInner {
             .get("plane_sizes")
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
-            .filter(|v: &Vec<u64>| v.len() == received_fds.len())
-            .unwrap_or_else(|| vec![0u64; received_fds.len()]);
+            .filter(|v: &Vec<u64>| v.len() == plane_fds.len())
+            .unwrap_or_else(|| vec![0u64; plane_fds.len()]);
 
-        let handles = match external_plane_handles_for_flavour(
+        let raw_plane_fds: Vec<std::os::fd::RawFd> =
+            plane_fds.iter().map(OwnedFd::as_raw_fd).collect();
+        let handles = external_plane_handles_for_flavour(
             response
                 .get("handle_type")
                 .and_then(|v| v.as_str())
                 .unwrap_or(SURFACE_HANDLE_TYPE_DMA_BUF),
-            &received_fds,
+            &raw_plane_fds,
             &plane_sizes,
-        ) {
-            Ok(handles) => handles,
-            Err(unknown_flavour) => {
-                // SAFETY: fds the kernel delivered to this process; the
-                // refused import adopted none of them, and nothing else
-                // closes them.
-                for fd in &received_fds {
-                    unsafe { libc::close(*fd) };
-                }
-                return Err(unknown_flavour);
-            }
-        };
+        )?;
+        leave_plane_fds_to_the_import(plane_fds);
         let pixel_buffer =
             PixelBuffer::from_external_plane_handles(&handles, 0, 0, PixelFormat::default())?;
 
@@ -1276,7 +1316,7 @@ impl SurfaceStoreInner {
             "width": pixel_buffer.width,
             "height": pixel_buffer.height,
             "format": pixel_buffer.format().wire_name(),
-            "resource_type": "pixel_buffer",
+            "resource_type": SURFACE_RESOURCE_TYPE_PIXEL_BUFFER,
             "handle_type": exported_planes.handle_type,
             "plane_sizes": exported_planes.plane_sizes,
             "plane_offsets": exported_planes.plane_offsets,
@@ -1471,7 +1511,7 @@ impl SurfaceStoreInner {
                 "width": texture.width(),
                 "height": texture.height(),
                 "format": texture.format().wire_name(),
-                "resource_type": "texture",
+                "resource_type": SURFACE_RESOURCE_TYPE_TEXTURE,
                 "handle_type": SURFACE_HANDLE_TYPE_OPAQUE_FD,
                 "plane_sizes": [allocation_size],
                 "plane_offsets": [0u64],
@@ -1577,7 +1617,7 @@ impl SurfaceStoreInner {
             "width": pixel_buffer.width,
             "height": pixel_buffer.height,
             "format": pixel_buffer.format().wire_name(),
-            "resource_type": "pixel_buffer",
+            "resource_type": SURFACE_RESOURCE_TYPE_PIXEL_BUFFER,
             "handle_type": exported_planes.handle_type,
             "plane_sizes": exported_planes.plane_sizes,
             "plane_offsets": exported_planes.plane_offsets,
@@ -1635,18 +1675,17 @@ impl SurfaceStoreInner {
             streamlib_surface_client::MAX_DMA_BUF_PLANES,
         )
         .map_err(|e| Error::Configuration(format!("Unix socket lookup failed: {}", e)))?;
+        let mut plane_fds = adopt_reply_fds(received_fds);
 
         if let Some(error) = response
             .get("error")
             .and_then(|v: &serde_json::Value| v.as_str())
         {
-            for fd in &received_fds {
-                unsafe { libc::close(*fd) };
-            }
             return Err(Error::Configuration(format!("lookup: {}", error)));
         }
 
-        if received_fds.is_empty() {
+        keep_only_the_plane_fds(&response, &mut plane_fds);
+        if plane_fds.is_empty() {
             return Err(Error::Configuration(
                 "lookup: no memory fd in response".into(),
             ));
@@ -1662,10 +1701,7 @@ impl SurfaceStoreInner {
             .and_then(|v| v.as_str())
             .unwrap_or("dma_buf");
 
-        if handle_type == "opaque_fd" {
-            for fd in &received_fds {
-                unsafe { libc::close(*fd) };
-            }
+        if handle_type == SURFACE_HANDLE_TYPE_OPAQUE_FD {
             return Err(Error::NotSupported(
                 "SurfaceStore::lookup_buffer: surface registered with \
                  handle_type=\"opaque_fd\"; the host-side PixelBuffer \
@@ -1682,17 +1718,18 @@ impl SurfaceStoreInner {
             .get("plane_sizes")
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
-            .filter(|v: &Vec<u64>| v.len() == received_fds.len())
-            .unwrap_or_else(|| vec![0u64; received_fds.len()]);
+            .filter(|v: &Vec<u64>| v.len() == plane_fds.len())
+            .unwrap_or_else(|| vec![0u64; plane_fds.len()]);
 
-        let handles: Vec<RhiExternalHandle> = received_fds
+        let handles: Vec<RhiExternalHandle> = plane_fds
             .iter()
             .zip(plane_sizes.iter())
             .map(|(fd, size)| RhiExternalHandle::DmaBuf {
-                fd: *fd,
+                fd: fd.as_raw_fd(),
                 size: *size as usize,
             })
             .collect();
+        leave_plane_fds_to_the_import(plane_fds);
         PixelBuffer::from_external_plane_handles(&handles, 0, 0, PixelFormat::default())
     }
 
@@ -1774,26 +1811,35 @@ impl SurfaceStoreInner {
             streamlib_surface_client::MAX_DMA_BUF_PLANES,
         )
         .map_err(|e| Error::Configuration(format!("Unix socket lookup_texture failed: {}", e)))?;
+        let mut reply_fds = adopt_reply_fds(received_fds);
 
         if let Some(error) = response
             .get("error")
             .and_then(|v: &serde_json::Value| v.as_str())
         {
-            for fd in &received_fds {
-                unsafe { libc::close(*fd) };
-            }
             return Err(Error::Configuration(format!("lookup_texture: {}", error)));
         }
 
-        if received_fds.is_empty() {
+        // Refused by name before anything is parsed: a pool slot answers
+        // this lookup too, in the pixel-buffer vocabulary, and it is not a
+        // texture whatever its format string parses as.
+        let resource_type = response
+            .get("resource_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or(SURFACE_RESOURCE_TYPE_PIXEL_BUFFER);
+        if resource_type != SURFACE_RESOURCE_TYPE_TEXTURE {
+            return Err(Error::Configuration(format!(
+                "lookup_texture: {surface_id:?} is registered as a {resource_type}, not a texture"
+            )));
+        }
+
+        if reply_fds.is_empty() {
             return Err(Error::Configuration(
                 "lookup_texture: no DMA-BUF fd in response".into(),
             ));
         }
-        let dma_buf_fd = received_fds[0];
-        for fd in &received_fds[1..] {
-            unsafe { libc::close(*fd) };
-        }
+        let dma_buf_fd = reply_fds.remove(0);
+        drop(reply_fds);
 
         // Extract width, height, format from the response
         let width = response
@@ -2077,7 +2123,7 @@ fn surface_export_staging_registration_payload(
         "width": width,
         "height": height,
         "format": format.wire_name(),
-        "resource_type": "pixel_buffer",
+        "resource_type": SURFACE_RESOURCE_TYPE_PIXEL_BUFFER,
         "handle_type": SURFACE_HANDLE_TYPE_OPAQUE_FD,
         "plane_sizes": [staging_byte_size],
         "plane_offsets": [0],
@@ -2121,7 +2167,7 @@ fn dma_buf_texture_registration_payload(
         "width": texture.width(),
         "height": texture.height(),
         "format": texture.format().wire_name(),
-        "resource_type": "texture",
+        "resource_type": SURFACE_RESOURCE_TYPE_TEXTURE,
         "plane_offsets": plane_offsets,
         "plane_strides": plane_strides,
         "drm_format_modifier": texture.chosen_drm_format_modifier(),
@@ -2744,6 +2790,25 @@ mod fd_ownership_tests {
             .count()
     }
 
+    /// The service thread runs in this process too, and it closes its dup
+    /// of the plane only after `sendmsg` has already delivered a copy to
+    /// the lookup, so a count taken the instant a reply lands can include
+    /// a copy that is about to close. A leak never settles back; a dup in
+    /// flight does within microseconds.
+    fn open_descriptors_of_the_plane_once_the_service_thread_settled(
+        plane_name: &str,
+        expected: usize,
+    ) -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let count = open_descriptors_of_the_plane(plane_name);
+            if count == expected || std::time::Instant::now() >= deadline {
+                return count;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     fn memfd_named(plane_name: &str, bytes: &[u8]) -> RawFd {
         use std::io::Write;
         use std::os::unix::io::{FromRawFd, IntoRawFd};
@@ -2788,7 +2853,7 @@ mod fd_ownership_tests {
                 "width": 4,
                 "height": 4,
                 "format": crate::core::rhi::PixelFormat::Rgba32.wire_name(),
-                "resource_type": "pixel_buffer",
+                "resource_type": SURFACE_RESOURCE_TYPE_PIXEL_BUFFER,
                 "handle_type": "dma_buf",
                 "plane_sizes": [64],
                 "plane_offsets": [0],
@@ -2819,15 +2884,19 @@ mod fd_ownership_tests {
         let (_socket_dir, mut service, _registering_connection, store) =
             store_against_a_service_holding_one_pixel_buffer_slot(PLANE);
 
-        let first = store.lookup_texture(PIXEL_BUFFER_SLOT_ID);
-        assert!(first.is_err(), "a pixel-buffer slot is not a texture");
-        let descriptors_after_one_refusal = open_descriptors_of_the_plane(PLANE);
-        for _ in 0..8 {
-            assert!(store.lookup_texture(PIXEL_BUFFER_SLOT_ID).is_err());
+        let descriptors_before_any_lookup = open_descriptors_of_the_plane(PLANE);
+        for _ in 0..9 {
+            assert!(
+                store.lookup_texture(PIXEL_BUFFER_SLOT_ID).is_err(),
+                "a pixel-buffer slot is not a texture"
+            );
         }
         assert_eq!(
-            open_descriptors_of_the_plane(PLANE),
-            descriptors_after_one_refusal,
+            open_descriptors_of_the_plane_once_the_service_thread_settled(
+                PLANE,
+                descriptors_before_any_lookup
+            ),
+            descriptors_before_any_lookup,
             "every refused texture lookup must close the plane fd the service sent with its reply"
         );
         service.stop();
@@ -2839,18 +2908,19 @@ mod fd_ownership_tests {
         let (_socket_dir, mut service, _registering_connection, store) =
             store_against_a_service_holding_one_pixel_buffer_slot(PLANE);
 
-        let first = store.lookup_buffer(PIXEL_BUFFER_SLOT_ID);
-        assert!(
-            first.is_err(),
-            "a memfd is not a DMA-BUF, so the import must refuse"
-        );
-        let descriptors_after_one_refusal = open_descriptors_of_the_plane(PLANE);
-        for _ in 0..8 {
-            assert!(store.lookup_buffer(PIXEL_BUFFER_SLOT_ID).is_err());
+        let descriptors_before_any_lookup = open_descriptors_of_the_plane(PLANE);
+        for _ in 0..9 {
+            assert!(
+                store.lookup_buffer(PIXEL_BUFFER_SLOT_ID).is_err(),
+                "a memfd is not a DMA-BUF, so the import must refuse"
+            );
         }
         assert_eq!(
-            open_descriptors_of_the_plane(PLANE),
-            descriptors_after_one_refusal,
+            open_descriptors_of_the_plane_once_the_service_thread_settled(
+                PLANE,
+                descriptors_before_any_lookup
+            ),
+            descriptors_before_any_lookup,
             "every failed buffer lookup must close the plane fds the service sent with its reply"
         );
         service.stop();

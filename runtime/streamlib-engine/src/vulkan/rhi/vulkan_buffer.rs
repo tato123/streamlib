@@ -914,33 +914,37 @@ impl HostVulkanBuffer {
 
     /// Import a buffer from a single-plane DMA-BUF file descriptor.
     ///
-    /// Thin wrapper over [`Self::from_dma_buf_fds`] for back-compat with
-    /// existing single-plane callers — new code should prefer the
-    /// multi-plane signature even when there is only one plane.
-    #[tracing::instrument(level = "trace", skip(vulkan_device), fields(fd, allocation_size))]
+    /// Thin wrapper over [`Self::from_dma_buf_fds`] with the same fd
+    /// ownership contract.
+    #[tracing::instrument(
+        level = "trace",
+        skip(vulkan_device, dma_buf_fd),
+        fields(allocation_size)
+    )]
     pub fn from_dma_buf_fd(
         vulkan_device: &Arc<HostVulkanDevice>,
-        fd: std::os::unix::io::RawFd,
+        dma_buf_fd: std::os::fd::OwnedFd,
         allocation_size: vk::DeviceSize,
     ) -> Result<Self> {
-        Self::from_dma_buf_fds(vulkan_device, &[fd], &[allocation_size])
+        Self::from_dma_buf_fds(vulkan_device, vec![dma_buf_fd], &[allocation_size])
     }
 
     /// Import one `vk::Buffer` + `vk::DeviceMemory` pair per plane from
     /// the given DMA-BUF fds. `plane_sizes[i]` must be the non-zero
     /// allocation size of plane `i`.
     ///
-    /// Partial-failure semantics: if plane N fails to import, every
-    /// plane 0..N that already succeeded is torn down (buffer destroyed,
-    /// memory unmapped + freed) before the error is returned. The
-    /// caller retains ownership of the fds — each fd is consumed by
-    /// `vkAllocateMemory` only on success.
-    #[tracing::instrument(level = "trace", skip(vulkan_device, fds, plane_sizes), fields(plane_count = fds.len()))]
+    /// Takes the fds by value because by the time this returns every one
+    /// of them has exactly one fate: owned by the driver behind a plane
+    /// that imported, or closed. If plane N fails, planes 0..N are torn
+    /// down (the driver closes their fds with the memory) and the fds of
+    /// plane N and after are closed here — the caller holds nothing.
+    #[tracing::instrument(level = "trace", skip(vulkan_device, dma_buf_fds, plane_sizes), fields(plane_count = dma_buf_fds.len()))]
     pub fn from_dma_buf_fds(
         vulkan_device: &Arc<HostVulkanDevice>,
-        fds: &[std::os::unix::io::RawFd],
+        dma_buf_fds: Vec<std::os::fd::OwnedFd>,
         plane_sizes: &[vk::DeviceSize],
     ) -> Result<Self> {
+        let fds = dma_buf_fds;
         if fds.is_empty() {
             return Err(Error::Configuration(
                 "DMA-BUF import: fd vec must be non-empty".into(),
@@ -962,9 +966,10 @@ impl HostVulkanBuffer {
         }
 
         // Import every plane. Stash each successful import in a vec so we
-        // can unwind on partial failure.
+        // can unwind on partial failure; the fds not yet reached stay in
+        // the iterator and close with it on the way out.
         let mut imported: Vec<VulkanImportedPlane> = Vec::with_capacity(fds.len());
-        for (idx, (&fd, &plane_size)) in fds.iter().zip(plane_sizes.iter()).enumerate() {
+        for (idx, (fd, &plane_size)) in fds.into_iter().zip(plane_sizes.iter()).enumerate() {
             if plane_size == 0 {
                 for plane in imported.into_iter() {
                     teardown_imported_plane(vulkan_device, plane);
@@ -1014,18 +1019,12 @@ impl HostVulkanBuffer {
     /// [`crate::core::rhi::PixelBuffer`] receives synthetic dimensions
     /// (see [`Self::new_storage_buffer_host_visible`] for the convention).
     ///
-    /// Caller retains ownership of `fd` only when import fails *before*
-    /// `vkAllocateMemory` consumes the descriptor (parameter validation
-    /// rejections, `vkCreateBuffer` failure). On successful return the
-    /// driver owns the fd — caller must NOT `close()` it. If
-    /// `vkAllocateMemory` succeeds but a later step (`vkBindBufferMemory`,
-    /// `vkMapMemory`) fails, the fd is still consumed (the import path
-    /// frees the imported memory + destroys the buffer, but the kernel-
-    /// side fd transfer is irreversible).
-    #[tracing::instrument(level = "trace", skip(vulkan_device), fields(fd, size))]
+    /// Same fd ownership as [`Self::from_dma_buf_fds`]: the driver owns
+    /// the fd behind a successful import and every other exit closes it.
+    #[tracing::instrument(level = "trace", skip(vulkan_device, dma_buf_fd), fields(size))]
     pub fn from_dma_buf_fd_as_storage_buffer(
         vulkan_device: &Arc<HostVulkanDevice>,
-        fd: std::os::unix::io::RawFd,
+        dma_buf_fd: std::os::fd::OwnedFd,
         size: u64,
     ) -> Result<Self> {
         if size == 0 {
@@ -1040,7 +1039,7 @@ impl HostVulkanBuffer {
             )));
         }
         let effective_size = size as vk::DeviceSize;
-        let plane = import_single_plane(vulkan_device, fd, effective_size)?;
+        let plane = import_single_plane(vulkan_device, dma_buf_fd, effective_size)?;
         Ok(Self {
             vulkan_device: Arc::clone(vulkan_device),
             buffer: plane.buffer,
@@ -1191,9 +1190,11 @@ impl HostVulkanBuffer {
 #[cfg(target_os = "linux")]
 fn import_single_plane(
     vulkan_device: &Arc<HostVulkanDevice>,
-    fd: std::os::unix::io::RawFd,
+    dma_buf_fd: std::os::fd::OwnedFd,
     effective_size: vk::DeviceSize,
 ) -> Result<VulkanImportedPlane> {
+    use std::os::fd::{AsRawFd as _, IntoRawFd as _};
+
     let device = vulkan_device.device();
 
     let mut external_buffer_info = vk::ExternalMemoryBufferCreateInfo::builder()
@@ -1217,17 +1218,21 @@ fn import_single_plane(
     let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
     let alloc_size = effective_size.max(mem_requirements.size);
 
-    let memory = vulkan_device
-        .import_dma_buf_memory(
-            fd,
-            alloc_size,
-            mem_requirements.memory_type_bits,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        )
-        .map_err(|e| {
+    let memory = match vulkan_device.import_dma_buf_memory(
+        dma_buf_fd.as_raw_fd(),
+        alloc_size,
+        mem_requirements.memory_type_bits,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+    ) {
+        Ok(memory) => {
+            let _ = dma_buf_fd.into_raw_fd();
+            memory
+        }
+        Err(e) => {
             unsafe { device.destroy_buffer(buffer, None) };
-            e
-        })?;
+            return Err(e);
+        }
+    };
 
     unsafe { device.bind_buffer_memory(buffer, memory, 0) }.map_err(|e| {
         vulkan_device.free_imported_memory(memory);
@@ -1314,6 +1319,16 @@ unsafe impl Sync for HostVulkanBuffer {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::{FromRawFd as _, OwnedFd};
+
+    /// A pipe's read end stands in for a plane fd a refusal must close;
+    /// a fake number would make that close land on someone else's fd.
+    fn a_pipe_read_end() -> OwnedFd {
+        let mut pipe_ends = [0 as std::os::unix::io::RawFd; 2];
+        assert_eq!(unsafe { libc::pipe(pipe_ends.as_mut_ptr()) }, 0);
+        unsafe { libc::close(pipe_ends[1]) };
+        unsafe { OwnedFd::from_raw_fd(pipe_ends[0]) }
+    }
     #[cfg(target_os = "linux")]
     use crate::vulkan::rhi::video_profile_test_fixture::{
         VideoProfileWithOwnedCodecExtensionChain, device_supports_h264_for_bitstream_direction,
@@ -1867,8 +1882,12 @@ mod tests {
         assert!(fd >= 0);
 
         // Import into a new buffer from the DMA-BUF fd
-        let imported = HostVulkanBuffer::from_dma_buf_fd(&device, fd, src.size())
-            .expect("DMA-BUF import failed");
+        let imported = HostVulkanBuffer::from_dma_buf_fd(
+            &device,
+            unsafe { OwnedFd::from_raw_fd(fd) },
+            src.size(),
+        )
+        .expect("DMA-BUF import failed");
 
         // Verify imported buffer has the same data
         unsafe {
@@ -1932,9 +1951,14 @@ mod tests {
         let fd1 = src1.export_dma_buf_fd().expect("plane 1 export failed");
 
         // Import both as planes of a single pixel buffer.
-        let imported =
-            HostVulkanBuffer::from_dma_buf_fds(&device, &[fd0, fd1], &[plane_size, plane_size])
-                .expect("multi-plane DMA-BUF import failed");
+        let imported = HostVulkanBuffer::from_dma_buf_fds(
+            &device,
+            vec![unsafe { OwnedFd::from_raw_fd(fd0) }, unsafe {
+                OwnedFd::from_raw_fd(fd1)
+            }],
+            &[plane_size, plane_size],
+        )
+        .expect("multi-plane DMA-BUF import failed");
 
         assert_eq!(imported.plane_count(), 2, "plane_count must report 2");
         assert_eq!(imported.plane_size(0), plane_size);
@@ -1989,16 +2013,15 @@ mod tests {
             }
         };
 
-        // fds/sizes vecs with one more entry than the cap. Negative fds
-        // are fine — we expect the length check to fire before any
-        // syscall touches them.
-        let fds: Vec<std::os::unix::io::RawFd> = (0..=streamlib_surface_client::MAX_DMA_BUF_PLANES
-            as i32)
-            .map(|_| -1i32)
+        // fds/sizes vecs with one more entry than the cap. Real pipe ends
+        // stand in for the planes: the refusal owns and closes them, and
+        // a fake number would make that close land on someone else's fd.
+        let fds: Vec<OwnedFd> = (0..=streamlib_surface_client::MAX_DMA_BUF_PLANES)
+            .map(|_| a_pipe_read_end())
             .collect();
         let sizes: Vec<vk::DeviceSize> = vec![1024; fds.len()];
 
-        let result = HostVulkanBuffer::from_dma_buf_fds(&device, &fds, &sizes);
+        let result = HostVulkanBuffer::from_dma_buf_fds(&device, fds, &sizes);
         match result {
             Ok(_) => panic!("oversize plane vec must be rejected"),
             Err(e) => assert!(
@@ -2125,8 +2148,12 @@ mod tests {
         let fd = src.export_dma_buf_fd().expect("DMA-BUF export failed");
         assert!(fd >= 0);
 
-        let imported = HostVulkanBuffer::from_dma_buf_fd_as_storage_buffer(&device, fd, byte_size)
-            .expect("DMA-BUF SSBO import failed");
+        let imported = HostVulkanBuffer::from_dma_buf_fd_as_storage_buffer(
+            &device,
+            unsafe { OwnedFd::from_raw_fd(fd) },
+            byte_size,
+        )
+        .expect("DMA-BUF SSBO import failed");
 
         assert_eq!(imported.size(), byte_size as vk::DeviceSize);
         assert!(!imported.mapped_ptr().is_null());
@@ -2160,9 +2187,8 @@ mod tests {
             }
         };
 
-        // fd = -1 would fail at import-time; but size validation runs
-        // first so the fd is never touched here.
-        match HostVulkanBuffer::from_dma_buf_fd_as_storage_buffer(&device, -1, 0) {
+        // Size validation runs first, so the fd is only ever closed here.
+        match HostVulkanBuffer::from_dma_buf_fd_as_storage_buffer(&device, a_pipe_read_end(), 0) {
             Err(Error::Configuration(msg)) => {
                 assert!(msg.contains("size must be > 0"), "got: {msg}");
             }
@@ -2171,7 +2197,11 @@ mod tests {
         }
 
         let oversized = (u32::MAX as u64) + 1;
-        match HostVulkanBuffer::from_dma_buf_fd_as_storage_buffer(&device, -1, oversized) {
+        match HostVulkanBuffer::from_dma_buf_fd_as_storage_buffer(
+            &device,
+            a_pipe_read_end(),
+            oversized,
+        ) {
             Err(Error::Configuration(msg)) => {
                 assert!(
                     msg.contains("exceeds 4 GB synthetic-width cap"),
@@ -2226,7 +2256,11 @@ mod tests {
 
         let oversized: u64 = 16 * 1024 * 1024;
         let before = device.live_import_allocation_count();
-        let result = HostVulkanBuffer::from_dma_buf_fd_as_storage_buffer(&device, fd, oversized);
+        let result = HostVulkanBuffer::from_dma_buf_fd_as_storage_buffer(
+            &device,
+            unsafe { OwnedFd::from_raw_fd(fd) },
+            oversized,
+        );
         let after = device.live_import_allocation_count();
 
         // Strict: the driver MUST reject. If it accepts, either the
@@ -2250,9 +2284,6 @@ mod tests {
             before, after,
             "failed import must not leak VkDeviceMemory — live count: before={before}, after={after}"
         );
-        // fd ownership stayed with the caller because allocate failed;
-        // close it.
-        unsafe { libc::close(fd) };
     }
 
     /// `new_video_bitstream` rejects `size = 0` with a [`Error::Configuration`]
