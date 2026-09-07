@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.1](https://github.com/tatolab/streamlib/compare/v0.19.0...v0.19.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* **engine:** a refused surface-store lookup closes the plane fds it received ([#2207](https://github.com/tatolab/streamlib/issues/2207)) ([#2208](https://github.com/tatolab/streamlib/issues/2208)) ([e1f87e7](https://github.com/tatolab/streamlib/commit/e1f87e792f1480bd97f96085eb57c6d159f3a230))
+
 ## [0.19.0](https://github.com/tatolab/streamlib/compare/v0.18.60...v0.19.0) (2026-09-07)
 
 
