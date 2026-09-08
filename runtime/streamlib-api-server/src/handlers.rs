@@ -106,11 +106,14 @@ pub(crate) fn build_router(
 
     let state = AppState { runtime, openapi };
 
-    // TraceLayer logs all HTTP requests with method, path, status, and latency.
+    // Method, path, status and latency for every request, at DEBUG so a client
+    // polling the node stays out of the app's own log at the default `info`
+    // filter; `RUST_LOG=tower_http=debug` is how you ask for it. The on-failure
+    // hook keeps its ERROR default — a request that fails is news either way.
     let trace_layer = TraceLayer::new_for_http()
-        .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
-        .on_request(DefaultOnRequest::new().level(Level::INFO))
-        .on_response(DefaultOnResponse::new().level(Level::INFO));
+        .make_span_with(DefaultMakeSpan::new().level(Level::DEBUG))
+        .on_request(DefaultOnRequest::new().level(Level::DEBUG))
+        .on_response(DefaultOnResponse::new().level(Level::DEBUG));
 
     let mut tap_router = Router::new().route("/ws/tap/{channel}", get(tap_websocket_handler));
     if let Some(tap_auth_token) = tap_auth_token {
@@ -693,7 +696,7 @@ mod router_surface_and_auth_gate_tests {
     }
 
     /// Router in the default (auth-off) mode — every route is open with no token.
-    fn auth_disabled_router() -> Router {
+    pub(super) fn auth_disabled_router() -> Router {
         build_router(Arc::new(ControlPlaneRouterStubRuntime::default()), None)
     }
 
@@ -1173,5 +1176,78 @@ mod router_surface_and_auth_gate_tests {
             rendered.contains("image/png"),
             "the 200 must be documented as binary PNG: {rendered}"
         );
+    }
+}
+
+#[cfg(test)]
+mod control_plane_request_trace_level_tests {
+    //! The log level a routine control-plane request speaks at.
+    //!
+    //! At the engine's default `info` filter a node's control plane adds
+    //! nothing to the app's own log. The trace is levelled, not deleted, so
+    //! `RUST_LOG=tower_http=debug` brings all three records back.
+
+    use super::router_surface_and_auth_gate_tests::auth_disabled_router;
+    use super::*;
+    use crate::control_plane_stub_support::CapturedTracingRecords;
+    use axum::body::Body;
+    use axum::http::Request;
+    use serial_test::serial;
+    use tower::ServiceExt;
+
+    fn serve_one_graph_request() {
+        let request_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a current-thread runtime builds");
+        request_runtime.block_on(async {
+            let response = auth_disabled_router()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/graph")
+                        .body(Body::empty())
+                        .expect("the graph request builds"),
+                )
+                .await
+                .expect("the router answers");
+            assert_eq!(response.status(), StatusCode::OK);
+        });
+    }
+
+    fn tower_http_trace_targets_under(env_filter_directives: &str) -> Vec<String> {
+        CapturedTracingRecords::captured_from_the_second_of_two_runs(
+            env_filter_directives,
+            serve_one_graph_request,
+        )
+        .iter()
+        .filter(|record| record.target.starts_with("tower_http"))
+        .map(|record| record.target.clone())
+        .collect()
+    }
+
+    #[test]
+    #[serial]
+    fn a_routine_request_says_nothing_at_the_default_info_filter() {
+        let targets = tower_http_trace_targets_under("info");
+        assert!(
+            targets.is_empty(),
+            "a request must be silent at the engine's default filter, got: {targets:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn the_same_request_traces_all_three_hooks_under_tower_http_debug() {
+        let targets = tower_http_trace_targets_under("info,tower_http=debug");
+        for hook in [
+            "tower_http::trace::make_span",
+            "tower_http::trace::on_request",
+            "tower_http::trace::on_response",
+        ] {
+            assert!(
+                targets.iter().any(|target| target == hook),
+                "asking for the request trace must yield {hook}, got: {targets:?}"
+            );
+        }
     }
 }

@@ -185,22 +185,37 @@ pub(crate) async fn require_bearer_token(
         .and_then(|value| value.to_str().ok())
         .and_then(bearer_token_from_header);
 
+    // A rejection is the one thing on this path worth an app's default log
+    // level: `DefaultOnFailure` classifies only 5xx as failure, so nothing else
+    // records a refused credential once the request trace sits at DEBUG.
     match presented {
-        None => (
-            StatusCode::UNAUTHORIZED,
-            Json(UnauthorizedResponse {
-                error: "MissingBearerToken",
-            }),
-        )
-            .into_response(),
+        None => {
+            tracing::warn!(
+                path = request.uri().path(),
+                "control-plane request rejected: no bearer token presented"
+            );
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(UnauthorizedResponse {
+                    error: "MissingBearerToken",
+                }),
+            )
+                .into_response()
+        }
         Some(token) if expected.matches(token) => next.run(request).await,
-        Some(_) => (
-            StatusCode::FORBIDDEN,
-            Json(ForbiddenResponse {
-                error: "InvalidBearerToken",
-            }),
-        )
-            .into_response(),
+        Some(_) => {
+            tracing::warn!(
+                path = request.uri().path(),
+                "control-plane request rejected: presented bearer token does not match"
+            );
+            (
+                StatusCode::FORBIDDEN,
+                Json(ForbiddenResponse {
+                    error: "InvalidBearerToken",
+                }),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -224,6 +239,7 @@ fn bearer_token_from_header(header: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use axum::{Router, body::Body, http::Request, routing::post};
+    use serial_test::serial;
     use tower::ServiceExt;
 
     fn protected_test_router(token: ApiServerBearerToken) -> Router {
@@ -243,6 +259,69 @@ mod tests {
         }
         let request = builder.body(Body::empty()).unwrap();
         router.oneshot(request).await.unwrap().status()
+    }
+
+    /// Serve one request to the protected route with `auth`, from a sync
+    /// context: the capture fixture drives the closure it is given twice.
+    fn request_with_auth_header(auth: Option<&'static str>) -> impl Fn() {
+        move || {
+            let request_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a current-thread runtime builds");
+            request_runtime.block_on(async { status_for_auth_header(auth).await });
+        }
+    }
+
+    /// The messages a request with `auth` raises at WARN under the engine's
+    /// default filter.
+    fn warnings_from_one_request_with_auth_header(auth: Option<&'static str>) -> Vec<String> {
+        crate::control_plane_stub_support::CapturedTracingRecords::captured_from_the_second_of_two_runs(
+            "info",
+            request_with_auth_header(auth),
+        )
+        .iter()
+        .filter(|record| record.level == tracing::Level::WARN)
+        .map(|record| record.message.clone())
+        .collect()
+    }
+
+    /// A refused credential is the one thing on this path an operator must see
+    /// without raising the filter — the per-request trace sits at DEBUG, and
+    /// `DefaultOnFailure` never fires for a 4xx.
+    #[test]
+    #[serial]
+    fn a_missing_token_is_warned_about_at_the_default_filter() {
+        let warnings = warnings_from_one_request_with_auth_header(None);
+        assert!(
+            warnings
+                .iter()
+                .any(|message| message.contains("no bearer token presented")),
+            "a 401 must be visible at the default filter, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn a_wrong_token_is_warned_about_at_the_default_filter() {
+        let warnings = warnings_from_one_request_with_auth_header(Some("Bearer wrong-token"));
+        assert!(
+            warnings
+                .iter()
+                .any(|message| message.contains("does not match")),
+            "a 403 must be visible at the default filter, got: {warnings:?}"
+        );
+    }
+
+    /// And an accepted request stays as quiet as every other routine one.
+    #[test]
+    #[serial]
+    fn an_accepted_token_warns_about_nothing() {
+        let warnings = warnings_from_one_request_with_auth_header(Some("Bearer correct-horse"));
+        assert!(
+            warnings.is_empty(),
+            "an accepted request must add nothing to the app's log, got: {warnings:?}"
+        );
     }
 
     #[tokio::test]

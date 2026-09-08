@@ -62,3 +62,6 @@ streamlib = { path = "../../sdk/streamlib-sdk", version = "0.19.1", features = [
 tempfile = "3"
 tower = {version = "0.5", features = ["util"]}
 serial_test = "3.2"
+# The request-trace level test drives a request under a real `EnvFilter` and
+# captures what reached the subscriber.
+tracing-subscriber.workspace = true
