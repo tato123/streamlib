@@ -1189,111 +1189,46 @@ mod control_plane_request_trace_level_tests {
 
     use super::router_surface_and_auth_gate_tests::auth_disabled_router;
     use super::*;
+    use crate::control_plane_stub_support::CapturedTracingRecords;
     use axum::body::Body;
     use axum::http::Request;
     use serial_test::serial;
     use tower::ServiceExt;
-    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
-    /// The `target` of every tracing span and event raised while this is the
-    /// calling thread's default subscriber.
-    ///
-    /// Spans are recorded alongside events because the request span is the
-    /// third hook the trace layer levels, and it raises no event of its own.
-    #[derive(Clone, Default)]
-    struct CapturedTracingSpanAndEventTargets {
-        recorded_targets: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl CapturedTracingSpanAndEventTargets {
-        fn forget_everything_captured_so_far(&self) {
-            self.recorded_targets.lock().clear();
-        }
-
-        fn tower_http_trace_targets(&self) -> Vec<String> {
-            self.recorded_targets
-                .lock()
-                .iter()
-                .filter(|target| target.starts_with("tower_http"))
-                .cloned()
-                .collect()
-        }
-    }
-
-    impl<S: tracing::Subscriber> Layer<S> for CapturedTracingSpanAndEventTargets {
-        fn on_new_span(
-            &self,
-            span: &tracing::span::Attributes<'_>,
-            _id: &tracing::span::Id,
-            _context: Context<'_, S>,
-        ) {
-            self.recorded_targets
-                .lock()
-                .push(span.metadata().target().to_string());
-        }
-
-        fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, S>) {
-            self.recorded_targets
-                .lock()
-                .push(event.metadata().target().to_string());
-        }
-    }
-
-    async fn serve_one_graph_request() {
-        let response = auth_disabled_router()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/graph")
-                    .body(Body::empty())
-                    .expect("the graph request builds"),
-            )
-            .await
-            .expect("the router answers");
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    /// The `tower_http` trace targets one graph request raises under
-    /// `env_filter_directives`.
-    ///
-    /// `registry + EnvFilter + one recording layer` is the subscriber the
-    /// engine installs for an app, so what this captures is what that app's
-    /// stdout and JSONL would carry.
-    ///
-    /// Two requests, because `tracing` caches each callsite's `Interest`
-    /// process-globally, computed once from whichever thread first reaches it —
-    /// and every other test in this binary serves requests with no subscriber
-    /// installed, so whichever of them touches one of these three callsites
-    /// first caches `never` for the exact records under test. The first request
-    /// registers them, `rebuild_interest_cache` recomputes them against this
-    /// thread's filter, and the second request is the one measured. Both
-    /// callers are `#[serial]` because that rebuild rewrites process-global
-    /// state, not because a specific interleaving is known to bite.
-    fn tower_http_trace_targets_from_one_graph_request(env_filter_directives: &str) -> Vec<String> {
-        let captured = CapturedTracingSpanAndEventTargets::default();
-        let subscriber = tracing_subscriber::registry()
-            .with(tracing_subscriber::EnvFilter::new(env_filter_directives))
-            .with(captured.clone());
-
-        tracing::subscriber::with_default(subscriber, || {
-            let request_runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("a current-thread runtime builds");
-            request_runtime.block_on(async {
-                serve_one_graph_request().await;
-                tracing::callsite::rebuild_interest_cache();
-                captured.forget_everything_captured_so_far();
-                serve_one_graph_request().await;
-            });
+    fn serve_one_graph_request() {
+        let request_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a current-thread runtime builds");
+        request_runtime.block_on(async {
+            let response = auth_disabled_router()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/graph")
+                        .body(Body::empty())
+                        .expect("the graph request builds"),
+                )
+                .await
+                .expect("the router answers");
+            assert_eq!(response.status(), StatusCode::OK);
         });
+    }
 
-        captured.tower_http_trace_targets()
+    fn tower_http_trace_targets_under(env_filter_directives: &str) -> Vec<String> {
+        CapturedTracingRecords::captured_from_the_second_of_two_runs(
+            env_filter_directives,
+            serve_one_graph_request,
+        )
+        .iter()
+        .filter(|record| record.target.starts_with("tower_http"))
+        .map(|record| record.target.clone())
+        .collect()
     }
 
     #[test]
     #[serial]
     fn a_routine_request_says_nothing_at_the_default_info_filter() {
-        let targets = tower_http_trace_targets_from_one_graph_request("info");
+        let targets = tower_http_trace_targets_under("info");
         assert!(
             targets.is_empty(),
             "a request must be silent at the engine's default filter, got: {targets:?}"
@@ -1303,7 +1238,7 @@ mod control_plane_request_trace_level_tests {
     #[test]
     #[serial]
     fn the_same_request_traces_all_three_hooks_under_tower_http_debug() {
-        let targets = tower_http_trace_targets_from_one_graph_request("info,tower_http=debug");
+        let targets = tower_http_trace_targets_under("info,tower_http=debug");
         for hook in [
             "tower_http::trace::make_span",
             "tower_http::trace::on_request",

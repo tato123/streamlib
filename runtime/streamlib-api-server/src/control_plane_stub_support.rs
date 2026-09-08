@@ -1,7 +1,8 @@
 // Copyright (c) 2025 Jonathan Fontanez
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Shared test scaffolding for the two control-plane front ends.
+//! Shared test scaffolding for the control plane's two front ends and for
+//! the tests that assert on what it logs.
 
 /// Implement every graph-mutating [`RuntimeOperations`] method as `unreachable!`,
 /// naming `$surface` (`"route"` / `"tool"`) in each panic.
@@ -308,3 +309,107 @@ macro_rules! surface_exchange_op_answers_the_stub {
 }
 
 pub(crate) use surface_exchange_op_answers_the_stub;
+
+/// One tracing span or event raised while [`CapturedTracingRecords`] was
+/// installed. A span carries its name as the message; it has no other.
+pub(crate) struct CapturedTracingRecord {
+    pub(crate) level: ::tracing::Level,
+    pub(crate) target: String,
+    pub(crate) message: String,
+}
+
+/// Every tracing span and event raised on the calling thread while this is its
+/// default subscriber's layer.
+///
+/// Spans are captured alongside events because the control plane's request
+/// trace levels a span that raises no event of its own.
+#[derive(Clone, Default)]
+pub(crate) struct CapturedTracingRecords(
+    ::std::sync::Arc<::parking_lot::Mutex<Vec<::std::sync::Arc<CapturedTracingRecord>>>>,
+);
+
+impl CapturedTracingRecords {
+    /// Run `raising_them` twice under an `env_filter_directives`-filtered
+    /// subscriber, and answer with what the second run raised.
+    ///
+    /// `registry + EnvFilter + one recording layer` is the subscriber the
+    /// engine installs for an app, so what this captures is what that app's
+    /// stdout and JSONL would carry.
+    ///
+    /// Twice, because `tracing` caches each callsite's `Interest`
+    /// process-globally, computed once from whichever thread first reaches it —
+    /// and the rest of this crate's tests drive the control plane with no
+    /// subscriber installed, which caches `never` for the very records a log
+    /// assertion is about. The first run registers the callsites,
+    /// `rebuild_interest_cache` recomputes them against this thread's filter,
+    /// and the second run is the one answered. That rebuild rewrites
+    /// process-global state, so every caller belongs under `#[serial]`.
+    pub(crate) fn captured_from_the_second_of_two_runs(
+        env_filter_directives: &str,
+        raising_them: impl Fn(),
+    ) -> Vec<::std::sync::Arc<CapturedTracingRecord>> {
+        use ::tracing_subscriber::layer::SubscriberExt;
+
+        let captured = Self::default();
+        let subscriber = ::tracing_subscriber::registry()
+            .with(::tracing_subscriber::EnvFilter::new(env_filter_directives))
+            .with(captured.clone());
+
+        ::tracing::subscriber::with_default(subscriber, || {
+            raising_them();
+            ::tracing::callsite::rebuild_interest_cache();
+            captured.0.lock().clear();
+            raising_them();
+        });
+
+        let recorded = captured.0.lock();
+        recorded.clone()
+    }
+}
+
+impl<S: ::tracing::Subscriber> ::tracing_subscriber::layer::Layer<S> for CapturedTracingRecords {
+    fn on_new_span(
+        &self,
+        span: &::tracing::span::Attributes<'_>,
+        _id: &::tracing::span::Id,
+        _context: ::tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let metadata = span.metadata();
+        self.0
+            .lock()
+            .push(::std::sync::Arc::new(CapturedTracingRecord {
+                level: *metadata.level(),
+                target: metadata.target().to_string(),
+                message: metadata.name().to_string(),
+            }));
+    }
+
+    fn on_event(
+        &self,
+        event: &::tracing::Event<'_>,
+        _context: ::tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut message = String::new();
+        event.record(&mut OneCapturedRecordMessage(&mut message));
+        let metadata = event.metadata();
+        self.0
+            .lock()
+            .push(::std::sync::Arc::new(CapturedTracingRecord {
+                level: *metadata.level(),
+                target: metadata.target().to_string(),
+                message,
+            }));
+    }
+}
+
+/// Renders an event's `message` field, the one field a log assertion reads.
+struct OneCapturedRecordMessage<'a>(&'a mut String);
+
+impl ::tracing::field::Visit for OneCapturedRecordMessage<'_> {
+    fn record_debug(&mut self, field: &::tracing::field::Field, value: &dyn ::std::fmt::Debug) {
+        use ::std::fmt::Write;
+        if field.name() == "message" {
+            let _ = write!(self.0, "{value:?}");
+        }
+    }
+}
