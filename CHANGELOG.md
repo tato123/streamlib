@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.19.2](https://github.com/tatolab/streamlib/compare/v0.19.1...v0.19.2) (2026-09-08)
+
+
+### Bug Fixes
+
+* **control-plane:** a routine request is silent at the default info filter ([#2211](https://github.com/tatolab/streamlib/issues/2211)) ([1ca5f8e](https://github.com/tatolab/streamlib/commit/1ca5f8e7ad289aa9da89850b05f6186bcc69b2ad))
+* **examples:** camera-virtual-camera needs the release that plugged the fd leak ([#2212](https://github.com/tatolab/streamlib/issues/2212)) ([b3c2a33](https://github.com/tatolab/streamlib/commit/b3c2a330437bbda3ba7d0d7a644de9abb2f59abf))
+
 ## [0.19.1](https://github.com/tatolab/streamlib/compare/v0.19.0...v0.19.1) (2026-09-07)
 
 
