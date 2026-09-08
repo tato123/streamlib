@@ -43,7 +43,7 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   format; third-party Rust processors for Rust apps are ordinary cargo dependencies,
   source-compiled. [importable-python-library — SHIPPED #1715]
 
-## Packages & extension model — IN-FLIGHT (→ virtual-camera-sink)
+## Packages & extension model — IN-FLIGHT
 
 - **DECIDED** — PyPI and cargo are the package systems. The custom module system is
   deleted in full: `streamlib_modules/`, the `.slpkg` format, `streamlib.lock`, the
@@ -115,7 +115,8 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   done as engine code inside the extension's own change, rather than by the extension
   reaching past the surface. Known gaps at the pivot: a Python compute dispatch cannot
   bind a storage buffer, and codec sessions are not exported to Python. [extension-model;
-  clause (c) added by virtual-camera-sink, 2026-09-06]
+  clause (c) added and first fired by virtual-camera-sink — SHIPPED #2196, #2197, #2198]
+  <!-- verify: pytest sdk/streamlib-python-wheel/tests/test_virtual_camera_sink.py -->
 - **DECIDED** — The `streamlib` wheel exports its bag codec as two module-level functions
   with stub entries: `encode_bag_to_msgpack_bytes(bag: Mapping[str, Any]) -> bytes` and
   `decode_msgpack_bytes_to_python_object(msgpack_bytes: bytes) -> Any`. They are the
@@ -323,7 +324,7 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   <!-- verify: pytest sdk/streamlib-python-wheel/tests/test_video_frame_claim.py -->
   <!-- verify: pytest sdk/streamlib-python-wheel/tests/test_compute_kernel.py::test_a_raise_inside_the_staged_cpu_door_discards_the_edit -->
 
-## Consumers — examples & packages — IN-FLIGHT (→ virtual-camera-sink)
+## Consumers — examples & packages — SHIPPED
 <!-- verify: bash .claude/scripts/ship-change-removed-gate.sh docs/plan/changes/archive/2026-08-31-consumer-tree-disposition.md -->
 
 - **DECIDED** — `examples/` is the in-repo showcase and living documentation of the
@@ -652,7 +653,7 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   green-thread style): intended, do not build until designed; hard constraint — no new
   configuration dials. [execution-model]
 
-## Graphics (RHI / GPU) — IN-FLIGHT (→ virtual-camera-sink)
+## Graphics (RHI / GPU) — IN-FLIGHT
 
 - **DECIDED** — All Vulkan lives in the RHI (`vulkan/rhi/` + `streamlib-consumer-rhi`); one
   kernel abstraction per pipeline kind; consumers go through `GpuContext` only.
@@ -747,6 +748,52 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   <!-- verify: cargo test -p streamlib-engine the_seam_publishes_a_staged_edit_back_into_the_pooled_backing -->
   <!-- verify: pytest sdk/streamlib-python-wheel/tests/test_compute_kernel.py::test_a_texture_backed_surfaces_pixels_reach_the_cpu_with_numpy_alone -->
   <!-- verify: bash .claude/scripts/ship-change-removed-gate.sh docs/plan/changes/archive/2026-08-24-texture-backed-cpu-reach.md -->
+- **DECIDED** — The RHI imports a caller's own host mapping as memory the GPU writes
+  into: one primitive, `GpuContextFullAccess::import_host_mapping_for_gpu_writes` over
+  `HostMappingWrittenByGpu`, with the tier inside the abstraction and never at the caller.
+  Imported tier — `VK_EXT_external_memory_host`, enabled by the optional-extension pattern
+  with `minImportedHostPointerAlignment` snapshotted at device create — binds the
+  page-aligned range as a `STORAGE_BUFFER`, so a kernel's writes land in that memory and no
+  CPU touches them; publishing is a buffer barrier to the `HOST` stage. Staged tier — the
+  extension absent, or the driver declining that particular range — allocates host-cached
+  staging of the same length and publishes with one `memcpy`; never the write-combined
+  sequential-write allocation, whose cost the decode path already measured. The holder
+  reads `tier()` and `fallback_reason()` and logs which branch it took, once. This is what
+  lets a built-in hand the GPU a device mapping it does not own — the virtual camera's
+  loopback buffers are the first — rather than reading pixels back to copy them in.
+  [virtual-camera-sink — SHIPPED #2196]
+  <!-- verify: cargo test -p streamlib-engine a_host_mapping_takes_the_imported_tier_when_the_device_allows_it -->
+  <!-- verify: cargo test -p streamlib-engine a_refused_import_falls_back_to_host_cached_staging_and_says_why -->
+- **DECIDED** — `RhiColorConverter` runs both directions over one shader pair: the
+  existing YUYV-buffer-to-RGBA-image pass, and its inverse writing an RGBA or BGRA image
+  into a YUYV buffer at a stated destination stride, with the encoding matrix the algebraic
+  inverse of the decoding one and the range taken from the frame's own `ColorInfo`. And a
+  converter is ownable, not only cached: `GpuContext::color_converter()` hands every holder
+  the same kernel, and a kernel owns one descriptor set, so two holders dispatching it
+  concurrently rewrite each other's bindings under a submitted command buffer — a live
+  cross-camera corruption in `CameraSource` as much as in the new sink. Any per-processor
+  path that dispatches conversion on its own thread takes `create_color_converter` instead.
+  [virtual-camera-sink — SHIPPED #2196]
+  <!-- verify: cargo test -p streamlib-engine the_yuyv_pass_writes_every_pixel_of_the_target_range -->
+  <!-- verify: cargo test -p streamlib-engine an_owned_color_converter_shares_no_kernel_with_the_cached_one -->
+- **DECIDED** — A consumer of a *published* frame barriers it out of whatever layout it
+  was observed in into the layout its own descriptor declares, and republishes that layout
+  on the registration; only `UNDEFINED` is refused, because only `UNDEFINED` is free to
+  discard the picture. Hard-coding the arriving layout is the bug it replaces: a frame
+  published from the app process arrives in `SHADER_READ_ONLY_OPTIMAL` and one published
+  from a helper arrives in `GENERAL`, so a sink that admits only the first silently
+  consumes nothing from any graph with a Python processor in it — and sampling in place
+  instead is undefined, since the sampled descriptor states one layout whatever the image
+  is in. [virtual-camera-sink — SHIPPED #2198]
+  <!-- verify: cargo test -p streamlib-media-builtins every_published_layout_is_admitted_and_only_an_unpublished_one_is_refused -->
+  <!-- verify: cargo test -p streamlib-media-builtins both_doors_barrier_into_the_layout_a_sampled_descriptor_declares -->
+- **OPEN** — Serialising a `TextureRegistration`'s layout cell. The engine's contract is
+  read-then-barrier-then-update with no lock held across the submit, which the encoder, the
+  present compositor and the escalate path all follow; two app-process consumers fanned
+  from one producer can therefore observe the same layout and both barrier out of it. It
+  is confined to the same-process texture cache — a re-imported registration and a private
+  host texture share no cell — and whether the fix is a lock, a per-consumer view, or a
+  narrower contract is an engine-wide call, not one a built-in makes for itself.
 - **DECIDED** — Python spells a kernel as an object: constructed in `setup()` where the
   capability typestate is Full, dispatched per frame in `process()`. Construction is
   registration and dispatch is a method call; no kernel handle string reaches Python.
@@ -804,7 +851,7 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   unbuilt engine capabilities rather than Python-reach gaps; equalising the construction
   surface with no pass to render against would buy nothing.
 
-## Media I/O — camera, display, audio, codecs — IN-FLIGHT (→ virtual-camera-sink)
+## Media I/O — camera, display, audio, codecs — IN-FLIGHT
 
 - **DECIDED** — First-party camera, display, and audio are native built-in processors
   in the engine tree, statically linked into the wheel — pre-built named blocks
@@ -848,18 +895,48 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   reclaimed by label at the next `setup()`; a device left behind by a crash is reclaimed
   the same way. Loopback door: memory-mapped output streaming, YUYV, the device format set
   from the first frame's extent and re-negotiated when the extent changes, the frame's
-  monotonic timestamp passed through on every queued buffer. PipeWire door: the engine's
-  DMA-BUF textures offered with their modifier beside a shared-memory fallback, the
-  consumer choosing, the frame's stamp on every buffer. The loopback door's per-frame path
-  is one GPU pass: the RGBA→YUYV conversion kernel writes straight into the mapped loopback
-  buffer through a host-pointer import the RHI gains (`VK_EXT_external_memory_host`), so no
-  CPU touches a pixel; where the driver refuses that import, the same kernel writes into
-  cached host staging and one copy lands it, and the import experiment on the platform
-  floor settles which branch is the default. The loopback device is reached through V4L2
-  ioctls alone and PipeWire through the engine's existing `dlsym` shim: no user-space
-  library is linked and the wheel's `DT_NEEDED` set does not grow. Owner rulings
-  2026-09-06: widened from loopback-only to two doors, then from pre-loaded devices to a
-  device per processor. [virtual-camera-sink]
+  monotonic timestamp passed through on every queued buffer, and `S_FMT` carrying
+  `V4L2_PIX_FMT_PRIV_MAGIC`, without which the V4L2 core zeroes the three extended
+  colorimetry axes and every reader derives limited range for a full-range picture.
+  PipeWire door: the engine's DMA-BUF textures offered with their modifier beside a
+  shared-memory fallback, the consumer choosing, the frame's stamp on every buffer in
+  `SPA_META_Header.pts` — the only place a consumer reads a stamp from, and the only one
+  that survives this arm's PipeWire 0.3.50 floor, since `pw_buffer.time` is a trailing
+  field of a struct the *host's* libpipewire allocates and arrived in 1.0.5. The loopback
+  door's per-frame path is one GPU pass: the RGBA→YUYV conversion kernel writes straight
+  into the mapped loopback buffer through the RHI's host-pointer import, so no CPU touches
+  a pixel; where the driver refuses that import, the same kernel writes into cached host
+  staging and one copy lands it. The platform floor settled on the import: NVIDIA 595.84
+  takes the loopback's own character-device mapping, so `imported_host_pointer` is the tier
+  this platform runs and the staged tier is a proven fallback rather than the norm. The
+  loopback device is reached through V4L2 ioctls alone and PipeWire through the engine's
+  existing `dlsym` shim — one process-wide loader and one entry-point list serving the
+  audio and the video half both: no user-space library is linked and the wheel's
+  `DT_NEEDED` set does not grow. An odd frame width is refused by name, since YUYV packs
+  two pixels to a macropixel and the module recomputes `bytesperline` from the width
+  whatever a caller states. Owner rulings 2026-09-06: widened from loopback-only to two
+  doors, then from pre-loaded devices to a device per processor. Proven on the rig for the
+  loopback door — two named cameras from one graph, read back as YUYV with matching
+  colorimetry and gone at shutdown. The PipeWire door is proven as far as registration and
+  negotiation (WirePlumber lists the node beside its V4L2 cameras; the offer carries the
+  modifier and its shared-memory sibling) and no further: no consumer reachable on the rig
+  negotiates a PipeWire camera at all — `pipewiresrc` fails identically for WirePlumber's
+  own V4L2 devices, and Chrome 152 ships the flag off — so which door a consumer takes and
+  what stamp it observes is unproven, and closing it needs a machine with a working
+  PipeWire camera consumer. [virtual-camera-sink — SHIPPED #2196, #2197, #2198]
+  <!-- verify: cargo test -p streamlib-media-builtins virtual_camera_sink -->
+  <!-- verify: pytest sdk/streamlib-python-wheel/tests/test_virtual_camera_sink.py -->
+  <!-- verify: cargo test -p streamlib-engine a_pipewire_camera_node_offers_a_modifier_and_a_shared_memory_sibling -->
+- **OPEN** — Two `VirtualCameraSink` behaviours the loopback door shipped with, each a
+  stated placeholder the implementation left for a ruling rather than deciding inline.
+  Re-negotiation keys on the extent alone, so a source that changes its `color_info` at the
+  same extent keeps the first frame's description on the device — the pixels stay
+  consistent with what the device was told, so the exposure is mis-signalled metadata and
+  not wrong pixels, and the alternative costs every reader a re-plug mid-stream. And a
+  device-configuration refusal — an `S_FMT` or `REQBUFS` that fails — latches for the
+  processor's life, so one transient device failure ends that camera's run; whether a retry
+  is owed, and whether it belongs to this built-in or to the runtime's restart policy, is
+  undecided.
 - **DECIDED** — Built-ins are written against the same handle-shaped hardware
   primitives third parties get — DMA-BUF / OPAQUE_FD import-export, present target,
   audio clock, color resolution, codec sessions — never against private engine guts;
@@ -2233,7 +2310,7 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   <!-- verify: pytest sdk/streamlib-python-wheel/tests/test_wheel_portability.py::test_the_native_extension_links_nothing_the_host_may_not_supply -->
   <!-- verify: pytest sdk/streamlib-python-wheel/tests/test_wheel_portability.py::test_the_glsl_compiler_is_linked_statically -->
 
-## Control plane & observability — IN-FLIGHT (→ virtual-camera-sink)
+## Control plane & observability — IN-FLIGHT
 
 - **DECIDED** — The control plane carries no optional capability's routes natively. A
   capability extension that needs an endpoint contributes it through the `host` door
@@ -2302,7 +2379,7 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   embed.
   [importable-python-library — SHIPPED #1683, #1711; importable-python-library-ripout
   — SHIPPED #1715; control-plane-surface-pixel-exchange — SHIPPED #1975 for the
-  `exchange` verb; virtual-camera-sink for the setup verb]
+  `exchange` verb; virtual-camera-sink — SHIPPED #2196 for the setup verb]
   <!-- verify: sdk/streamlib-python-wheel/tests/test_cli.py::test_this_wheel_is_the_only_streamlib_cli -->
   <!-- verify: pytest sdk/streamlib-python-wheel/tests/test_cli_observation_verbs.py -->
   <!-- verify: pytest sdk/streamlib-python-wheel/tests/test_cli_observation_verbs.py::test_the_channel_form_taps_then_exchanges_each_sampled_id -->
