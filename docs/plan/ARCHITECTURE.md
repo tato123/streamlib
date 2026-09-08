@@ -917,13 +917,14 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   whatever a caller states. Owner rulings 2026-09-06: widened from loopback-only to two
   doors, then from pre-loaded devices to a device per processor. Proven on the rig for the
   loopback door — two named cameras from one graph, read back as YUYV with matching
-  colorimetry and gone at shutdown. The PipeWire door is proven as far as registration and
-  negotiation (WirePlumber lists the node beside its V4L2 cameras; the offer carries the
-  modifier and its shared-memory sibling) and no further: no consumer reachable on the rig
-  negotiates a PipeWire camera at all — `pipewiresrc` fails identically for WirePlumber's
-  own V4L2 devices, and Chrome 152 ships the flag off — so which door a consumer takes and
-  what stamp it observes is unproven, and closing it needs a machine with a working
-  PipeWire camera consumer. [virtual-camera-sink — SHIPPED #2196, #2197, #2198]
+  colorimetry, and both gone at a shutdown no reader was holding, which is the removal's
+  good case and not a proof against the `EBUSY` path above. The PipeWire door is proven as
+  far as registration and negotiation (WirePlumber lists the node beside its V4L2 cameras;
+  the offer carries the modifier and its shared-memory sibling) and no further: no consumer
+  reachable on the rig negotiates a PipeWire camera at all — `pipewiresrc` fails identically
+  for WirePlumber's own V4L2 devices, and Chrome 152 ships the flag off — so which door a
+  consumer takes and what stamp it observes is unproven, and closing it needs a machine with
+  a working PipeWire camera consumer. [virtual-camera-sink — SHIPPED #2196, #2197, #2198]
   <!-- verify: cargo test -p streamlib-media-builtins virtual_camera_sink -->
   <!-- verify: pytest sdk/streamlib-python-wheel/tests/test_virtual_camera_sink.py -->
   <!-- verify: cargo test -p streamlib-engine a_pipewire_camera_node_offers_a_modifier_and_a_shared_memory_sibling -->
