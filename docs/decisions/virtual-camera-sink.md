@@ -118,6 +118,11 @@ exact 37 ms trap the decode path paid before its staging fix. Which tier a drive
 fact about that driver, logged once per sink; the first ticket measures it on the platform
 floor and the plan entry records the answer at fold time.
 
+The platform floor answered `imported_host_pointer`: NVIDIA 595.84 imports the
+v4l2loopback device's own character-device mapping, so nothing on this rig copies a pixel
+on the host. The staged tier is exercised by a misaligned range rather than by any driver
+we run on, which is the shape a capability tier should have — proven, and not the norm.
+
 ## The modprobe line the message prescribes
 
 > ~~`sudo modprobe v4l2loopback exclusive_caps=1 max_buffers=4 card_label="StreamLib Virtual Camera"`.~~
