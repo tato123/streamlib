@@ -578,8 +578,8 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   identity grammar, nothing a port declares and nothing `connect` compares — anywhere
   in the engine or the authoring surfaces. A JSON Schema *derived from* a type the
   author already wrote and served as documentation is not that layer: it is
-  code-first, it names nothing on a link, and no engine path reads it. The two entries
-  below are the only such schemas. [schema-free-ports — SHIPPED #1813, #1815; the
+  code-first, it names nothing on a link, and no engine path reads it. The entry below
+  is the only such schema. [schema-free-ports — SHIPPED #1813, #1815; the
   `SchemaIdent` grammar itself — processor-class-identity, SHIPPED #1841; narrowed by
   agent-readable-processor-catalog]
   <!-- verify: bash .claude/scripts/ship-change-removed-gate.sh docs/plan/changes/archive/2026-08-11-schema-free-ports.md -->
@@ -597,13 +597,6 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   refuses one. Reconfiguration takes the same object. Processors in the engine tree
   written the old way migrate with the change; consumers lag as §Consumers states.
   [agent-readable-processor-catalog]
-- **DECIDED** — The built-in bag conventions — video frame, audio block, encoded video
-  frame, encoded audio packet — are served over the control plane as JSON Schemas
-  derived from the cast types that define them, as documentation an agent reads:
-  never declared on a port, never compared by `connect`, never read by any engine
-  path. The host that mounts the control plane hands them in; the control plane
-  depends on no media crate. Port rendering is exactly what the entry below states.
-  [agent-readable-processor-catalog]
 - **DECIDED** — Port rendering in the control plane is name, description, delivery
   profile, direction, and — on an audio input that declared one — its window contract; no
   port carries a type in `graph`, `tap`, or any snapshot. A port that declared nothing
@@ -615,11 +608,12 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   <!-- verify: sdk/streamlib-python-wheel/tests/test_processor_declaration.py::test_a_declared_port_carries_no_type_key_under_any_spelling -->
   <!-- verify: sdk/streamlib-python-wheel/tests/test_processor_declaration.py::test_a_port_declaring_no_contract_carries_no_audio_window_key -->
   <!-- verify: cargo test -p streamlib-engine --lib core::compiler::compiler_ops::open_iceoryx2_service_op::tests::a_settled_contract_reaches_graph_on_the_port_that_settled_it -->
-- **OPEN** — What a port reports about the bags it produces or accepts, so an agent can
-  wire a custom processor it did not write — an input that only receives and may be fed
-  several shapes, an output that may write a duck-typed bag, nothing required, and a
-  form that survives a transport where no link names the producer. Undecided; the
-  shapes considered and set aside are recorded in
+- **OPEN** — What a port reports about the bags it produces or accepts, and how a bag
+  shape is described and served at all — by any author, the built-ins included — so an
+  agent can wire a custom processor it did not write: an input that only receives and
+  may be fed several shapes, an output that may write a duck-typed bag, nothing
+  required, and a form that survives a transport where no link names the producer.
+  Undecided; the shapes considered and set aside are recorded in
   `docs/research/2026-09-10-bag-shape-hints-for-agents.md`. Do not build; ports render
   exactly as the entry above states until this closes. [agent-readable-processor-catalog]
 - **DECIDED** — Three execution modes (reactive / manual / continuous); one dedicated

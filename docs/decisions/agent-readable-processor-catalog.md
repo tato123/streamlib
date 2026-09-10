@@ -10,7 +10,12 @@ Read this before adding any schema, descriptor field or registration path so tha
 agent driving a node over its control plane can learn what a processor accepts; before
 reintroducing keyword-argument configuration for a Python processor; before making the
 control plane depend on a media crate; and before answering "what does this port carry"
-with anything other than the open entry that holds it.
+or "how is a bag shape described" with anything other than the open entry that holds
+both.
+
+> Withdrawn 2026-09-10 (owner): this record once also covered serving the built-in bag
+> conventions as derived schemas. That is undecided — it is the same question as what a
+> port reports — and its text was removed rather than kept as a decision.
 
 ## Decision
 
@@ -19,10 +24,8 @@ already wrote — a `JsonSchema` derive on the Rust struct, the class named by t
 `__init__` annotation — carried on the descriptor and served in the processor catalog.
 Python config is that one class, constructed by the helper and handed in as an object;
 keyword-argument configuration is deleted. A Python class registers its descriptor when
-its decorator runs, so it is in the catalog before its first add. The four built-in bag
-conventions are served as schemas derived from their cast types, handed to the control
-plane by the host that mounts it, as documentation and nothing else. What a port
-reports about the bags it carries stays open.
+its decorator runs, so it is in the catalog before its first add. What a port reports
+about the bags it carries, and how a bag shape is described at all, stays open.
 
 The line that makes this consistent with the schema-free decision: that decision bans
 schema-first machinery at ports — a schema as the source of truth, codegen from it,
@@ -45,12 +48,6 @@ the other way, code to document, and attaches to nothing on a link.
 - **A `register` verb for Python** — an extra call whose only job is to make a class
   visible; the decorator already runs at import and already collects everything the
   descriptor needs.
-- **Author the bag conventions as prose inside the control plane** — a second copy of
-  four structs that nothing checks; deriving from the cast types and having the host
-  hand them in keeps one source and keeps the control plane media-agnostic.
-- **Make the control plane depend on the media crate to read the casts directly** — the
-  control plane would then know media types, which is precisely the coupling the
-  exchange decision kept out of it.
 - **Describe what a port carries now, as part of this** — every proposed shape read
   wrong on the receiving side or bound a hint to an importable class; it is held open
   with the survey that records why, rather than decided badly.
@@ -66,11 +63,8 @@ the other way, code to document, and attaches to nothing on a link.
   config class rather than defaults.
 - Reconfiguration takes the config object; `configure(self, **config)` goes with the
   keyword form.
-- The control plane's host gains one typed hand-in — the built-in conventions — and no
-  general door for arbitrary documents; an installed package contributing its own is
-  not opened here.
 - A helper process importing a decorated class must register nothing, so the wheel has
   to know it is running as a helper at decoration time.
-- Nothing in the control plane says what a port carries. That was already accepted cost
-  under the schema-free decision; it is now an open entry with the research behind it,
-  not a settled absence.
+- Nothing in the control plane says what a port carries or what a bag looks like. That
+  was already accepted cost under the schema-free decision; it is now an open entry with
+  the research behind it, not a settled absence.
