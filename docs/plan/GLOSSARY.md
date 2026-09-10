@@ -80,10 +80,19 @@ consumer's view of a payload. A cast type that claims its surface is also the
 tensor-protocol producer for that frame. _Avoid_: "typed bag", "frame object" (a cast
 type need not be a frame).
 
+**Bag convention**: a documented bag shape the built-ins write and read — video frame,
+audio block, encoded video frame, encoded audio packet — named, and served by a node as
+a schema derived from its cast type. Documentation, never a declaration: no port names
+one and no link checks one. _Avoid_: "bag type"; "bag schema" as a thing a port has.
+
 **Control plane**: the HTTP/WebSocket/MCP surface a runtime hosts for observing,
 inspecting and changing the live graph of running nodes; the CLI is its client.
 Embedding happens by importing the wheel, never through the control plane. _Avoid_:
 "API server" as the concept (that is the component hosting it).
+
+**Processor catalog**: what a node reports it can add — every registered processor type
+with its description, config schema and ports — served over the control plane. _Avoid_:
+"registry" for the served view (the registry is the process-global table behind it).
 
 **Node**: a live runtime reachable over its control plane; discovered via the per-user
 on-disk registry. _Avoid_: "instance", "server".

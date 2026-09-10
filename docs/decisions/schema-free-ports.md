@@ -5,6 +5,11 @@ Rationale for the `[schema-free-ports]` entries in `docs/plan/ARCHITECTURE.md`
 `data-plane-cast-not-contract.md`, which kept unilateral hints, an advisory connect
 warning, and an inert wire tag — this decision removes all three.
 
+> Narrowed 2026-09-10 by `agent-readable-processor-catalog.md`: the ban is on
+> schema-first machinery at ports. A JSON Schema derived from a config type or a cast
+> type and served as documentation is code-first and outside it. Nothing this record
+> says about ports, `connect`, the wire or the engine changes.
+
 ## Trigger
 
 Read this before adding any type, schema, or identity field to a port declaration;

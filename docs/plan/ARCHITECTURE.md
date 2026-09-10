@@ -573,12 +573,37 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   never the control plane; a read-only count the producer polls, no callback, no
   configuration dial. The per-link counting decided above is the only piece today's work
   must honor. [delivery-profile-vocabulary]
-- **DECIDED** — There is no schema layer: no JTD, no schema registry, no embedded
-  schemas, no codegen and no generated type classes, and no schema identity grammar
-  anywhere in the engine or the authoring surfaces. [schema-free-ports — SHIPPED
-  #1813, #1815; the `SchemaIdent` grammar itself — processor-class-identity, SHIPPED
-  #1841]
+- **DECIDED** — There is no schema-first layer on ports: no JTD, no schema registry the
+  engine consults, no codegen from a schema, no generated type classes, no schema
+  identity grammar, nothing a port declares and nothing `connect` compares — anywhere
+  in the engine or the authoring surfaces. A JSON Schema *derived from* a type the
+  author already wrote and served as documentation is not that layer: it is
+  code-first, it names nothing on a link, and no engine path reads it. The two entries
+  below are the only such schemas. [schema-free-ports — SHIPPED #1813, #1815; the
+  `SchemaIdent` grammar itself — processor-class-identity, SHIPPED #1841; narrowed by
+  agent-readable-processor-catalog]
   <!-- verify: bash .claude/scripts/ship-change-removed-gate.sh docs/plan/changes/archive/2026-08-11-schema-free-ports.md -->
+- **DECIDED** — A processor's config shape is a JSON Schema derived from its config
+  type, carried on its descriptor and rendered by the control plane in the processor
+  catalog. In Rust the `config =` type derives `JsonSchema` — the SDK re-exports the
+  derive so a processor crate adds no dependency — and the `#[processor]` macro refuses
+  a config type without it, naming the fix. In Python a processor's config is one
+  class, named by the annotation on its `__init__`'s `config` parameter: any class
+  constructible from the config's keys with annotated fields — a TypedDict or a
+  dataclass yields the schema from its annotations and defaults; a model that carries
+  its own schema contributes it — and the helper constructs that class from the
+  configuration and hands the object in. Keyword-argument configuration is deleted,
+  not kept beside the class form. A processor that takes no config declares none and
+  refuses one. Reconfiguration takes the same object. Processors in the engine tree
+  written the old way migrate with the change; consumers lag as §Consumers states.
+  [agent-readable-processor-catalog]
+- **DECIDED** — The built-in bag conventions — video frame, audio block, encoded video
+  frame, encoded audio packet — are served over the control plane as JSON Schemas
+  derived from the cast types that define them, as documentation an agent reads:
+  never declared on a port, never compared by `connect`, never read by any engine
+  path. The host that mounts the control plane hands them in; the control plane
+  depends on no media crate. Port rendering is exactly what the entry below states.
+  [agent-readable-processor-catalog]
 - **DECIDED** — Port rendering in the control plane is name, description, delivery
   profile, direction, and — on an audio input that declared one — its window contract; no
   port carries a type in `graph`, `tap`, or any snapshot. A port that declared nothing
@@ -590,6 +615,13 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   <!-- verify: sdk/streamlib-python-wheel/tests/test_processor_declaration.py::test_a_declared_port_carries_no_type_key_under_any_spelling -->
   <!-- verify: sdk/streamlib-python-wheel/tests/test_processor_declaration.py::test_a_port_declaring_no_contract_carries_no_audio_window_key -->
   <!-- verify: cargo test -p streamlib-engine --lib core::compiler::compiler_ops::open_iceoryx2_service_op::tests::a_settled_contract_reaches_graph_on_the_port_that_settled_it -->
+- **OPEN** — What a port reports about the bags it produces or accepts, so an agent can
+  wire a custom processor it did not write — an input that only receives and may be fed
+  several shapes, an output that may write a duck-typed bag, nothing required, and a
+  form that survives a transport where no link names the producer. Undecided; the
+  shapes considered and set aside are recorded in
+  `docs/research/2026-09-10-bag-shape-hints-for-agents.md`. Do not build; ports render
+  exactly as the entry above states until this closes. [agent-readable-processor-catalog]
 - **DECIDED** — Three execution modes (reactive / manual / continuous); one dedicated
   OS thread per processor with descriptor-driven priority (realtime / high / normal);
   synchronous lifecycle traits; Full/Limited capability typestate on the phase axis
@@ -640,6 +672,12 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   <!-- verify: pytest sdk/streamlib-python-wheel/tests/test_processor_identity.py::test_the_launch_arrangement_never_changes_the_identity -->
   <!-- verify: pytest sdk/streamlib-python-wheel/tests/test_processor_identity.py::test_a_processor_declared_in_the_entry_file_is_refused -->
   <!-- verify: bash .claude/scripts/ship-change-removed-gate.sh docs/plan/changes/archive/2026-08-12-processor-class-identity.md -->
+- **DECIDED** — A Python processor class registers its descriptor — identity,
+  description, ports, config schema — when `@processor` runs, so it is in the processor
+  catalog before its first add; the constructor arrives at first add exactly as today.
+  Decoration inside a helper process registers nothing, because a helper hosts no
+  graph. A class decorated twice under one import path meets the existing
+  duplicate-path refusal. [agent-readable-processor-catalog]
 - **DECIDED** — An instance's display name is the human-facing label — passed at `add`,
   readable off the returned handle, and the prefix on its log records; it defaults to
   the class's short name and the engine disambiguates duplicates within one graph.
@@ -2340,9 +2378,10 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   removing live mutation was an overstep; a dynamic graph an agent cannot add to is
   not worth having). A mutation compiles inside the call, so the caller learns whether
   its change took rather than reading a `Running` node with nothing flowing. A Python
-  class is named by its import path and registered on its first add exactly as
-  `rt.add` registers it — the app process imports the class, the processor runs in
-  its own helper process — and a native built-in by the path `graph` reports for one;
+  class is named by its import path — its descriptor registered when its decorator ran,
+  its constructor at this first add exactly as `rt.add` supplies it; the app process
+  imports the class, the processor runs in its own helper process — and a native
+  built-in by the path `graph` reports for one;
   a link wired onto a running processor reaches it, and every channel is sized for a
   destination that connects later. `exchange` stays an observation verb because a read
   that costs the node a bounded copy is still a read. MCP is
