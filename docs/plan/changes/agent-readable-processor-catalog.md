@@ -67,7 +67,7 @@ from this renders anything new on a port.
 - A helper is recognisable at import time: the child runs `python -m streamlib._helper`
   with `STREAMLIB_ENTRYPOINT` and `STREAMLIB_PROCESSOR_ID` in its environment
   (`python_helper_process_spawn_host.rs:165-190`; constants at `_helper.py:48-52`).
-- Twenty-three Python processors take keyword configuration: six engine-tree fixtures
+- Twenty-four Python processors take keyword configuration: six engine-tree fixtures
   (`capability_context_probes.py:98`, `helper_placement_processors.py:21`,
   `helper_process_probes.py:21`, `single_processor_under_test.py:38`,
   `texture_ring_producer_probes.py:70`, and the string fixture at
@@ -134,8 +134,9 @@ from this renders anything new on a port.
   beside the existing `__streamlib_processor_*__` attributes (`_processor_declaration.py:385-395`).
 - **The schema is derived by the wheel with no dependency.** A `TypedDict` yields
   `properties` from its annotations and `required` from `__required_keys__`; a dataclass
-  yields `properties` from `dataclasses.fields()`, `default` from a field's default and
-  `required` from the absence of one; an `Annotated[T, "text"]` string on a field is its
+  yields `properties` from its `init=True` fields only — an `init=False` field is not a
+  constructor input and is not documented — `default` from a field's default, a field
+  with a `default_factory` counted as optional, and `required` from the absence of both; an `Annotated[T, "text"]` string on a field is its
   `description`; a class exposing `model_json_schema()` (pydantic, duck-typed, never
   imported) contributes that document verbatim. Type mapping is the obvious one —
   `int`/`float`/`str`/`bool` to `integer`/`number`/`string`/`boolean`, `list[T]` to
@@ -147,9 +148,12 @@ from this renders anything new on a port.
   declaring no config refuses a non-empty configuration by name; otherwise
   `processor_class(config=config_class(**configuration))`, and whatever the config
   class raises is what the author sees — a dataclass's `TypeError` for an unknown key, a
-  pydantic `ValidationError`, a `TypedDict` accepting the mapping as itself. There is no
-  schema validation in the wheel: construction is the validation, and the schema is what
-  the agent reads to get construction right. `apply_configuration` (`:42-54`) calls
+  pydantic `ValidationError`, a `TypedDict` accepting the mapping as itself. Construction
+  is the only check the wheel performs, and how strict it is is the author's choice of
+  config class, the same dial `read(port, into=T)` already is (`ARCHITECTURE.md:454-463`):
+  a `TypedDict` admits anything, a dataclass refuses an unknown key but not a mistyped
+  value, a model validates values. The wheel adds no validator of its own; the schema is
+  what the agent reads to get construction right, not a gate the wheel enforces. `apply_configuration` (`:42-54`) calls
   `configure(config_class(**configuration))`; the refusal text names `configure(self,
   config)`. The wire is unchanged: `rt.add(cls, config={…})` still carries a dict, the
   graph node still stores JSON, `ctx.config` is still the mapping.
@@ -158,8 +162,10 @@ from this renders anything new on a port.
   `config` rule; `stubtest` and pyright gate both as today.
 - **The six engine-tree fixtures migrate** to a config class in the change; the string
   fixture in `test_live_graph_mutation.py` with them. The fourteen example processors and
-  the four extension-wheel processors lag as §Consumers states, with backlog filed at
-  ship naming each.
+  the four extension-wheel processors lag as §Consumers states
+  (`docs/plan/ARCHITECTURE.md:327-436`: consumers are never in a migration's scope; a
+  converted consumer's breakage is filed as tracked backlog at that consumer), with the
+  backlog issues filed at ship naming each file.
 
 ## ADDED: §Processor model — declaration registers
 
@@ -199,8 +205,12 @@ from this renders anything new on a port.
   serde_json::Value }` lives in `streamlib-processor-schema` beside the other descriptor
   types; `streamlib_media_builtins::built_in_bag_convention_descriptors()` returns the
   four, named `video_frame`, `audio_block`, `encoded_video_frame`,
-  `encoded_audio_packet`. A media-crate test asserts each convention's `properties`
-  equal the keys its cast serializes, so the document cannot drift from the struct.
+  `encoded_audio_packet`. A media-crate test serializes a fully populated instance of
+  each cast and asserts, against its convention's document, that every serialized key is
+  a declared property, every declared property's `type` matches the value's JSON type,
+  every key the cast requires is in `required`, and a bytes field renders as the binary
+  string form — so the document cannot drift from the struct in name, type or
+  requiredness.
 - **The host hands them in.** `ApiServerControlPlaneHostConfig` gains
   `bag_conventions: Vec<BagConventionDescriptor>`; the host stores them for the router,
   and `AppState` (`state.rs:12-16`) carries them to the MCP dispatch. Both hosts pass the
@@ -222,21 +232,37 @@ from this renders anything new on a port.
   likewise.
 - **`/api/registry`** renders `config_schema` as a document (`openapi.json:294-299`
   regenerated); `graph` is unchanged — a node's `config` stays the JSON it was added with.
+- **This is a breaking release, pre-1.0.** `ProcessorDescriptor.config_schema`,
+  `with_config_schema` and the `ConfigDescriptor` re-export are public Rust API and
+  keyword configuration is public Python API; each implementing PR that changes one
+  carries the conventional `!` marker so release-please cuts the next minor as the
+  breaking line. No compatibility path: pre-1.0 renames cleanly and ships no shims
+  (CLAUDE.md §Non-negotiables).
 - **§Control plane's MCP entry** gains, at ship, the factual sentence #2215 already owes
   it: the node serves the processor catalog, the bag conventions and the live graph as
   resources and four recipes as prompts beside its tools.
 
 ## Assumptions stated, not asked
 
+- **One dialect, served.** Every catalog document is JSON Schema draft 2020-12 with no
+  `$schema` key: `schemars` 0.8 emits draft-07, so the descriptor seam renames
+  `definitions` to `$defs` and rewrites the `#/definitions/` references, which is the
+  whole of the difference in what it emits (nullable is already `"type": [T, "null"]`
+  and valid in both); the wheel's mapper emits 2020-12 directly, with `Optional[T]` as
+  `anyOf` with `{"type": "null"}` and nested classes inlined, never `$ref`; a model's
+  own document (pydantic v2 is 2020-12 already) is taken verbatim minus `$schema` and
+  `title`. `additionalProperties` is stated only where the config class refuses unknown
+  keys — a dataclass and a Rust struct with `deny_unknown_fields` — and omitted, meaning
+  open, elsewhere. One normalizing function in the engine, one test per emitter.
 - **Docstring fallback for `description`.** New behaviour the plan does not state; every
   agent SDK surveyed does it (`fn.__doc__` in the MCP Python SDK, griffe in Pydantic AI
   and the OpenAI SDK). Reversible in one line.
 - **Where the conventions ride.** A field on the host config, not on `ApiServerConfig`:
   they are documents, not the control plane's configuration, and `graph` would otherwise
   print four schemas inside the api-server node's `config` on every call.
-- **No schema validation in the wheel.** The wheel is stdlib-only and construction
-  already refuses a wrong key by name; validating twice would need a JSON Schema
-  validator dependency to say the same thing.
+- **No schema validation in the wheel.** The wheel is stdlib-only; the config class
+  decides strictness exactly as the read target does today, and a JSON Schema validator
+  dependency would add a second opinion the author did not ask for.
 - **`ctx.config` stays the mapping.** The processor holds the object it was constructed
   with; the context's `config` is the raw dict the graph node stores.
 - **Binary fields render as `contentEncoding: binary`.** JSON Schema has no bytes type;
@@ -244,7 +270,7 @@ from this renders anything new on a port.
 
 ## Relationship to #2215 and #2217
 
-#2215 renders what this change produces: the catalog resource reads
+Ticket #2215 renders what this change produces: the catalog resource reads
 `PROCESSOR_REGISTRY.list_registered()` and serves `config_schema` as the descriptor now
 carries it, the conventions resource serves the set the host handed in, and the prompts
 name only tools the node serves. `/derive-tickets` may fold #2215 in as the control-plane
