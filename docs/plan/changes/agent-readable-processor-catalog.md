@@ -2,8 +2,9 @@
 
 What a node can tell an agent about a processor before the agent adds it: a config shape
 that is a JSON Schema derived from the config type the author already wrote, a Python
-class that is in the catalog the moment its decorator runs, and the four built-in bag
-conventions served as schemas derived from their casts. Implements the four
+class that is in the catalog the moment its decorator runs, ~~and the four built-in bag
+conventions served as schemas derived from their casts~~ — the conventions slice is
+deferred to the port-reporting session (owner, 2026-09-10; see that section's note). Implements the four
 `[agent-readable-processor-catalog]` entries in `docs/plan/ARCHITECTURE.md` §Processor
 model (`:576-606`, `:675-680`) and the corrected first-add sentence in §Control plane
 (`:2381-2384`). Owner align 2026-09-10; rationale in
@@ -193,6 +194,13 @@ from this renders anything new on a port.
 
 ## ADDED: §Processor model / §Control plane — the built-in bag conventions, served
 
+> **Deferred 2026-09-10 (owner, at derive-tickets).** Everything in this section — what a
+> bag carries, how a shape is published by any author, and how the node serves it — is the
+> input/output topic and moves to the session that owns #2217. No ticket of this change
+> builds it; #2215's contracts resource waits with it. The plan entry at
+> `ARCHITECTURE.md:600-606` folds into the OPEN at `:618` when that session aligns. The
+> bullets below stay as the shape that was proposed, for that session to take or replace.
+
 - **The four casts derive `JsonSchema`** with their nested types — `ColorInfo`,
   `ContentLight`, `MasteringDisplay`, the colour enums, `AudioSampleDtype`,
   `EncodedVideoCodec`, `EncodedAudioCodec`. The three bytes fields carry
@@ -272,7 +280,8 @@ from this renders anything new on a port.
 
 Ticket #2215 renders what this change produces: the catalog resource reads
 `PROCESSOR_REGISTRY.list_registered()` and serves `config_schema` as the descriptor now
-carries it, the conventions resource serves the set the host handed in, and the prompts
+carries it, ~~the conventions resource serves the set the host handed in~~ (deferred with the
+conventions slice), and the prompts
 name only tools the node serves. `/derive-tickets` may fold #2215 in as the control-plane
 slice or keep it as the consumer ticket that lands after the descriptor slice; either
 way it is one place the MCP surface changes. #2217 owns what a port reports and blocks

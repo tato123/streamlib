@@ -603,6 +603,9 @@ Legend: **DECIDED** — build exactly this. **OPEN** — do not build; needs an 
   never declared on a port, never compared by `connect`, never read by any engine
   path. The host that mounts the control plane hands them in; the control plane
   depends on no media crate. Port rendering is exactly what the entry below states.
+  Deferred by the owner 2026-09-10 to the session that settles the OPEN below: how a bag
+  shape is published — by any author, the built-ins being four — and served is one
+  question with what a port reports, and this entry folds into that OPEN when it aligns.
   [agent-readable-processor-catalog]
 - **DECIDED** — Port rendering in the control plane is name, description, delivery
   profile, direction, and — on an audio input that declared one — its window contract; no
