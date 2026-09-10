@@ -143,7 +143,11 @@ caps across pads, Holoscan returns a tuple, DDS and ROS match per pair **[V]** (
 report, patterns 5). Our engine already gives the consumer something none of them do —
 an unforgeable source channel per bag through `read_from_inbound_link` **[V]**
 `sdk/streamlib-python-wheel/python/streamlib/_engine.pyi` around line 733. That, plus
-an optional in-bag name, covers every fan-in case without an input declaring anything.
+an optional in-bag name, covers fan-in without an input declaring anything — with one
+limit to state plainly: provenance names the link, not the bag, so a single channel that
+carries several shapes is only legible when each bag names its convention. That is the
+case AT Protocol's rule targets — the tag is required exactly where there is ambiguity
+— and whether to require it there is part of what the open entry has to settle.
 
 ### Why the reserved key must be stripped before a constructed cast
 
@@ -179,7 +183,10 @@ Not decided here; pointers for `/align`:
 - Declaration registers a Python class's descriptor; the constructor still arrives at
   first add.
 
-The Zenoh OPEN is untouched. The in-bag name is what Zenoh's per-sample `;schema` slot
+The Zenoh OPEN is untouched. A convention name resolves against the node's own document
+and nothing else; whether two nodes can publish different schemas under one name, and
+what identity a receiver would need to pick the intended one, is the fabric's question to
+settle when it is designed. The in-bag name is what Zenoh's per-sample `;schema` slot
 would carry, so nothing here has to be undone when that fabric is decided.
 
 ## What remains unknown
