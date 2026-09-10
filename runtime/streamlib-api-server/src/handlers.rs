@@ -631,6 +631,9 @@ mod router_surface_and_auth_gate_tests {
         Request, StatusCode,
         header::{AUTHORIZATION, CONTENT_TYPE},
     };
+    use streamlib::sdk::descriptors::{
+        ProcessorClassImportPath, ProcessorClassShortName, ProcessorDescriptor,
+    };
     use streamlib::sdk::runtime::BoxFuture;
     use tower::ServiceExt;
 
@@ -774,6 +777,48 @@ mod router_surface_and_auth_gate_tests {
                 "{documented} must not appear in the OpenAPI spec"
             );
         }
+    }
+
+    /// `/api/registry` is where an agent learns which keys a processor's
+    /// config takes, so it serves the descriptor's schema document itself —
+    /// each field's type, its description and its default — rather than a
+    /// name the agent would have to look up somewhere the node does not serve.
+    #[tokio::test]
+    async fn the_registry_serves_a_registered_processors_config_schema_document() {
+        let config_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "width": { "type": "integer", "description": "Frame width in pixels.", "default": 1280 },
+                "height": { "type": "integer", "description": "Frame height in pixels.", "default": 720 },
+            },
+            "required": [],
+        });
+        let class_import_path = "streamlib_api_server::registry_rendering_probe::TestPatternProbe";
+        PROCESSOR_REGISTRY
+            .register_descriptor_only(
+                ProcessorDescriptor::new(
+                    ProcessorClassShortName::new("TestPatternProbe").unwrap(),
+                    ProcessorClassImportPath::new(class_import_path).unwrap(),
+                    "a registry-rendering probe",
+                )
+                .with_config_schema(config_schema.clone()),
+            )
+            .expect("the probe's path is registered by this test alone");
+
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/registry")
+            .body(Body::empty())
+            .unwrap();
+        let served = json_body_on(auth_enabled_router(), request).await;
+
+        let probe = served["processors"]
+            .as_array()
+            .expect("a processor list")
+            .iter()
+            .find(|entry| entry["processor_class_import_path"] == class_import_path)
+            .expect("the probe the test registered");
+        assert_eq!(probe["config_schema"], config_schema);
     }
 
     /// The spec a client is generated from and the spec the node serves must be

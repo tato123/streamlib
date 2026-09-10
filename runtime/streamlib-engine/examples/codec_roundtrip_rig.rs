@@ -75,6 +75,7 @@ mod linux_rig {
     use streamlib::sdk::media_clock::MediaClock;
     use streamlib::sdk::processors::ContinuousProcessor;
     use streamlib::sdk::rhi::{PixelBuffer, PixelFormat, PublishedPixelBufferFrameId};
+    use streamlib::sdk::schemars::JsonSchema;
     use streamlib_media_builtins::mp4_annex_b_access_unit::{
         NAL_UNIT_LENGTH_PREFIX_BYTES, annex_b_access_unit_from_length_prefixed_sample,
     };
@@ -162,7 +163,8 @@ mod linux_rig {
     }
 
     /// Configuration for [`PsnrReferenceFixtureSource`].
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    #[schemars(crate = "streamlib::sdk::schemars")]
     pub struct PsnrReferenceFixtureSourceConfig {
         /// Directory of reference PNGs, replayed in sorted filename order.
         #[serde(default = "default_fixtures_directory")]
@@ -451,7 +453,8 @@ mod linux_rig {
     ///
     /// `Default` is the empty pair every processor config owes; the rig always
     /// states both, and an unset path is refused by name at `setup()`.
-    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+    #[schemars(crate = "streamlib::sdk::schemars")]
     pub struct RecordedMp4TrackReplaySourceConfig {
         /// The recording to replay.
         recording_path: String,

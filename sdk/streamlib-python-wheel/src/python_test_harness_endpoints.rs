@@ -26,12 +26,14 @@ use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 use streamlib::sdk::error::Result;
 use streamlib::sdk::processors::{ContinuousProcessor, ReactiveProcessor};
+use streamlib::sdk::schemars::JsonSchema;
 
 use crate::python_bag_conversion::{decode_msgpack_to_python_object, encode_bag_to_msgpack};
 use crate::python_logging::monotonic_clock_now_ns;
 
 /// Which channel an endpoint reads from or writes to.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct TestHarnessChannelConfig {
     /// The name this endpoint's queue is registered under.
     #[serde(default)]

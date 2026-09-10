@@ -138,6 +138,10 @@ pub mod sdk {
     /// `serde_json` re-export — required by macro-emitted paths.
     pub use streamlib_engine::serde_json;
 
+    /// `schemars` re-export — a processor crate derives `JsonSchema` on its
+    /// config type through this path and adds no dependency of its own.
+    pub use streamlib_engine::schemars;
+
     /// `crossbeam_channel` re-export — required by macro-emitted paths.
     pub use streamlib_engine::crossbeam_channel;
 
@@ -148,9 +152,6 @@ pub mod sdk {
     /// identity: a processor is named by the import path of the class it is,
     /// which the macro captures at its expansion site.
     pub use streamlib_engine::processor;
-
-    /// `#[derive(ConfigDescriptor)]` derive macro.
-    pub use streamlib_engine::ConfigDescriptor;
 
     // ---- Permission helpers ----
 

@@ -17,6 +17,7 @@ extern crate self as streamlib;
 // Re-export crossbeam_channel for macro-generated code
 pub use crossbeam_channel;
 pub use inventory;
+pub use schemars;
 pub use serde_json;
 
 pub mod core;
@@ -31,11 +32,10 @@ pub mod logging {
     pub use crate::core::logging::*;
 }
 
-// Re-export attribute macros for processor syntax:
-// - #[streamlib::processor(execution = …, …)] - execution + ports in code; a
-//   processor's identity is the import path of its type, captured by the macro
-// - #[derive(ConfigDescriptor)] - Config field metadata derive macro
-pub use streamlib_macros::{ConfigDescriptor, processor};
+// Re-export the attribute macro for processor syntax:
+// #[streamlib::processor(execution = …, …)] - execution + ports in code; a
+// processor's identity is the import path of its type, captured by the macro
+pub use streamlib_macros::processor;
 
 /// The `#[processor]` attribute accepts no authored identity, in any spelling.
 ///
@@ -302,9 +302,10 @@ pub mod sdk {
     pub use crate::iceoryx2;
     pub use crate::inventory;
     pub use crate::logging;
+    pub use crate::schemars;
     pub use crate::serde_json;
 
-    pub use streamlib_macros::{ConfigDescriptor, processor};
+    pub use streamlib_macros::processor;
 
     pub mod permissions {
         pub use crate::{

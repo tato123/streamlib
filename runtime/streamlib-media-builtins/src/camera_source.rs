@@ -29,6 +29,7 @@ use streamlib::sdk::rhi::{
     PixelBuffer, PixelFormat, RhiColorConverter, SourceLayoutInfo, StorageBuffer, Texture,
     TextureFormat, VulkanLayout,
 };
+use streamlib::sdk::schemars::JsonSchema;
 
 use v4l::FourCC;
 use v4l::buffer::Type;
@@ -53,7 +54,8 @@ const RING_SLOT_WAIT_TIMEOUT_NS: u64 = 2_000_000_000;
 const HOST_READBACK_WAIT_TIMEOUT_NS: u64 = 5_000_000_000;
 
 /// Configuration for [`CameraSource`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct CameraSourceConfig {
     /// V4L2 device path (`/dev/video0`). Absent: the first capture-capable
     /// device found.

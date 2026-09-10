@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use streamlib::sdk::context::{RuntimeContextFullAccess, RuntimeContextLimitedAccess};
 use streamlib::sdk::error::{Error, Result};
 use streamlib::sdk::processors::ReactiveProcessor;
+use streamlib::sdk::schemars::JsonSchema;
 
 use crate::mp4_fragmented_file_writer::Mp4FragmentedFileWriter;
 
@@ -29,7 +30,8 @@ pub const MP4_SINK_PROCESSOR_NAME: &str = "Mp4Sink";
 const SILENT_LINK_REPORT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Where the recording is written.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct Mp4SinkConfig {
     /// The file to write, created or truncated at `setup()`.
     ///

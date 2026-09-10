@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use streamlib::sdk::context::{GpuContextLimitedAccess, RuntimeContextFullAccess};
 use streamlib::sdk::engine::video::{EncodePacket, Preset, SimpleEncoder, SimpleEncoderConfig};
 use streamlib::sdk::error::{Error, Result};
+use streamlib::sdk::schemars::JsonSchema;
 
 use crate::encoded_stream_ordering::EncodedStreamOrderingPairCounter;
 use crate::encoded_video_frame::EncodedVideoFrame;
@@ -44,7 +45,8 @@ const ENCODE_PROGRESS_LOG_INTERVAL_FRAMES: u64 = 300;
 /// optional: dimensions and rate track the upstream frames, and the knobs
 /// below are the guardrail set the session surface accepts. Both codecs take
 /// exactly these, because the session surface takes exactly these.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct HardwareVideoEncoderConfig {
     /// Expected frame width — a guardrail, not a resize: a mismatching
     /// frame wins with a warning.

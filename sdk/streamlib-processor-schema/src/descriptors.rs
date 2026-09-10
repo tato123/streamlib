@@ -86,45 +86,6 @@ pub struct CodeExamples {
     pub typescript: String,
 }
 
-/// A configuration field for a processor.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfigField {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub field_type: String,
-    pub required: bool,
-    pub description: String,
-}
-
-impl ConfigField {
-    pub fn new(
-        name: impl Into<String>,
-        field_type: impl Into<String>,
-        required: bool,
-        description: impl Into<String>,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            field_type: field_type.into(),
-            required,
-            description: description.into(),
-        }
-    }
-}
-
-/// Trait for config structs to provide field metadata for descriptors.
-pub trait ConfigDescriptor {
-    /// Returns the list of config fields with their types and descriptions.
-    fn config_fields() -> Vec<ConfigField>;
-}
-
-/// Default implementation for unit type (no config).
-impl ConfigDescriptor for () {
-    fn config_fields() -> Vec<ConfigField> {
-        Vec::new()
-    }
-}
-
 /// Describes a processor with its ports and configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessorDescriptor {
@@ -148,9 +109,13 @@ pub struct ProcessorDescriptor {
     /// Entrypoint for non-Rust runtimes (e.g., "src.blur:BlurProcessor").
     #[serde(default)]
     pub entrypoint: Option<String>,
-    /// Reference to config schema (e.g., "com.example.blur.config@1.0.0").
+    /// The config type's JSON Schema, as JSON Schema draft 2020-12.
+    ///
+    /// `None` only on a descriptor built by hand without one — every
+    /// `#[processor]`-emitted descriptor carries a document, an empty-object
+    /// one where the processor declares no config.
     #[serde(default)]
-    pub config_schema: Option<String>,
+    pub config_schema: Option<serde_json::Value>,
     /// Declarative scheduling intent declared in the `#[processor]` attribute.
     /// Read at thread-spawn time; defaults to `Normal` priority.
     #[serde(default)]
@@ -196,8 +161,8 @@ impl ProcessorDescriptor {
         self
     }
 
-    pub fn with_config_schema(mut self, schema: impl Into<String>) -> Self {
-        self.config_schema = Some(schema.into());
+    pub fn with_config_schema(mut self, config_schema: serde_json::Value) -> Self {
+        self.config_schema = Some(config_schema);
         self
     }
 

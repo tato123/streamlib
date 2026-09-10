@@ -21,15 +21,14 @@ use syn::{ItemStruct, Path};
 ///
 /// `config_type_path` is the Rust type path for the processor's typed `Config`
 /// alias, taken verbatim from the attribute's `config = <Path>`; `None` binds
-/// the tolerant [`EmptyConfig`]. `config_field_name` is the generated struct
-/// field (present iff `config_type_path` is `Some`). `config_schema_id` is the
-/// descriptor-metadata id string emitted into `with_config_schema(...)`.
+/// `EmptyConfig`, whose schema is the empty object a processor declaring no
+/// config publishes. `config_field_name` is the generated struct field
+/// (present iff `config_type_path` is `Some`).
 pub fn generate_from_processor_schema(
     item: &ItemStruct,
     schema: &ProcessorSchema,
     config_type_path: Option<&Path>,
     config_field_name: Option<&str>,
-    config_schema_id: Option<&str>,
     sdk_root: TokenStream,
 ) -> TokenStream {
     let module_name = &item.ident;
@@ -54,7 +53,6 @@ pub fn generate_from_processor_schema(
         &config_type,
         &config_field_name,
         &custom_fields,
-        config_schema_id,
     );
 
     let processor_class_import_path_accessor = quote! {
@@ -315,7 +313,6 @@ fn generate_processor_impl_from_schema(
     config_type: &TokenStream,
     config_field_name: &Option<Ident>,
     custom_fields: &[CustomField],
-    config_schema_id: Option<&str>,
 ) -> TokenStream {
     use streamlib_processor_schema::ProcessorSchemaExecution;
 
@@ -391,7 +388,7 @@ fn generate_processor_impl_from_schema(
 
     let from_config_body =
         generate_from_config_from_schema(schema, config_field_name, custom_fields);
-    let descriptor_impl = generate_descriptor_from_schema(schema, description, config_schema_id);
+    let descriptor_impl = generate_descriptor_from_schema(schema, description, config_type);
     let iceoryx2_accessors = generate_iceoryx2_accessors_from_schema(schema);
 
     let update_config = config_field_name.as_ref().map(|name| {
@@ -564,14 +561,13 @@ fn generate_from_config_from_schema(
 
 /// Generate descriptor method from schema.
 ///
-/// `config_schema_id` is the descriptor-metadata id string emitted into
-/// `with_config_schema(...)`, declared (or synthesized from the config type)
-/// by the `#[processor(...)]` attribute. `None` when the processor declares
-/// no config.
+/// `config_type` is the processor's `Config` type — the declared `config =`
+/// path, or `EmptyConfig` where none was declared. Its JSON Schema is what the
+/// descriptor carries.
 fn generate_descriptor_from_schema(
     schema: &ProcessorSchema,
     description: &str,
-    config_schema_id: Option<&str>,
+    config_type: &TokenStream,
 ) -> TokenStream {
     let repository = "https://github.com/tatolab/streamlib";
 
@@ -621,13 +617,15 @@ fn generate_descriptor_from_schema(
         })
         .collect();
 
-    // Config schema reference (descriptor metadata), declared or synthesized
-    // by the attribute. Emitted verbatim into `with_config_schema(...)`.
-    let config_schema = config_schema_id.map(|schema_ref| {
-        quote! {
-            .with_config_schema(#schema_ref)
-        }
-    });
+    // The config type's JSON Schema. Reached through the bound-carrying
+    // trait rather than `schemars` directly, so a config type missing the
+    // derive fails on a diagnostic that names the fix.
+    let config_schema = quote! {
+        .with_config_schema(
+            <#config_type as __streamlib_sdk::descriptors::ProcessorConfigJsonSchema>
+                ::processor_config_schema_document()
+        )
+    };
 
     // Declarative scheduling intent. Absent → `Normal` priority. The OS
     // thread name is derived by the compiler from the processor type + node
@@ -1288,14 +1286,7 @@ mod processor_struct_emit_tests {
     }
 
     fn expand_probe_processor(item: &ItemStruct) -> TokenStream {
-        generate_from_processor_schema(
-            item,
-            &minimal_schema(),
-            None,
-            None,
-            None,
-            quote! { streamlib },
-        )
+        generate_from_processor_schema(item, &minimal_schema(), None, None, quote! { streamlib })
     }
 
     fn struct_with_cfg_attr_on_a_field() -> ItemStruct {
@@ -1442,10 +1433,16 @@ mod processor_struct_emit_tests {
     }
 
     fn rendered_descriptor() -> String {
+        rendered_descriptor_for_config_type(&quote! {
+            __streamlib_sdk::processors::EmptyConfig
+        })
+    }
+
+    fn rendered_descriptor_for_config_type(config_type: &TokenStream) -> String {
         render_token_stream_without_whitespace(generate_descriptor_from_schema(
             &minimal_schema(),
             "a probe",
-            None,
+            config_type,
         ))
     }
 
@@ -1457,7 +1454,6 @@ mod processor_struct_emit_tests {
             &quote! { __streamlib_sdk::processors::EmptyConfig },
             &None,
             &[],
-            None,
         ))
     }
 
@@ -1481,6 +1477,39 @@ mod processor_struct_emit_tests {
         assert!(
             rendered_descriptor().contains("Processor::processor_class_import_path()"),
             "the descriptor must take its identity from that one capture"
+        );
+    }
+
+    /// The descriptor's config slot carries the config type's schema, derived
+    /// through the bound-carrying trait — never a name, and never `schemars`
+    /// reached directly, which would fail on a bound the author has no path to.
+    #[test]
+    fn the_descriptor_derives_its_config_schema_from_the_declared_config_type() {
+        let rendered = rendered_descriptor_for_config_type(&quote! {
+            crate::camera_source::CameraSourceConfig
+        });
+        assert!(
+            rendered.contains(
+                "with_config_schema(<crate::camera_source::CameraSourceConfigas\
+                 __streamlib_sdk::descriptors::ProcessorConfigJsonSchema>::\
+                 processor_config_schema_document())"
+            ),
+            "the descriptor must derive the declared config type's schema — got: {rendered}"
+        );
+    }
+
+    /// A processor declaring no config still publishes a document: the empty
+    /// config's, which is an object with no properties.
+    #[test]
+    fn a_processor_declaring_no_config_still_carries_the_empty_configs_schema() {
+        let rendered = rendered_descriptor();
+        assert!(
+            rendered.contains(
+                "with_config_schema(<__streamlib_sdk::processors::EmptyConfigas\
+                 __streamlib_sdk::descriptors::ProcessorConfigJsonSchema>::\
+                 processor_config_schema_document())"
+            ),
+            "a no-config processor must still carry a schema — got: {rendered}"
         );
     }
 

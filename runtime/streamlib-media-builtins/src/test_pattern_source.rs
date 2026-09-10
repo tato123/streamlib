@@ -10,12 +10,14 @@ use streamlib::sdk::error::Result;
 use streamlib::sdk::media_clock::MediaClock;
 use streamlib::sdk::processors::ContinuousProcessor;
 use streamlib::sdk::rhi::{PixelBuffer, PixelFormat, PublishedPixelBufferFrameId};
+use streamlib::sdk::schemars::JsonSchema;
 
 use crate::video_frame::{ColorInfo, Primaries, Range, Transfer, VideoFrame};
 
 /// Configuration for [`TestPatternSource`]: frame size only — the pattern,
 /// rate, and pixel format are fixed.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct TestPatternSourceConfig {
     /// Frame width in pixels.
     #[serde(default = "default_width")]
@@ -186,6 +188,7 @@ impl ContinuousProcessor for TestPatternSource::Processor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use streamlib::sdk::processors::GeneratedProcessor;
 
     #[test]
     fn bars_cover_the_full_width_in_order() {
@@ -225,5 +228,25 @@ mod tests {
     fn config_defaults_to_720p() {
         let config: TestPatternSourceConfig = serde_json::from_str("{}").expect("empty config");
         assert_eq!((config.width, config.height), (1280, 720));
+    }
+
+    /// What an agent reads before it adds this processor. The defaults live in
+    /// two `#[serde(default = …)]` functions and nowhere else, so a document
+    /// that does not carry them is one the agent has to guess against.
+    #[test]
+    fn the_descriptor_publishes_each_config_fields_type_description_and_default() {
+        let descriptor = <TestPatternSource::Processor as GeneratedProcessor>::descriptor()
+            .expect("a descriptor");
+        let config_schema = descriptor.config_schema.expect("a config schema");
+
+        for (field, default, description) in [
+            ("width", 1280, "Frame width in pixels."),
+            ("height", 720, "Frame height in pixels."),
+        ] {
+            let rendered = &config_schema["properties"][field];
+            assert_eq!(rendered["type"], "integer", "{field}");
+            assert_eq!(rendered["default"], default, "{field}");
+            assert_eq!(rendered["description"], description, "{field}");
+        }
     }
 }
