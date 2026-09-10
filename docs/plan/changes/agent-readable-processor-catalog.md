@@ -200,8 +200,8 @@ from this renders anything new on a port.
   breaking line. No compatibility path: pre-1.0 renames cleanly and ships no shims
   (CLAUDE.md §Non-negotiables).
 - **§Control plane's MCP entry** gains, at ship, the factual sentence #2215 already owes
-  it: the node serves the processor catalog, the bag conventions and the live graph as
-  resources and four recipes as prompts beside its tools.
+  it: the node serves the processor catalog and the live graph as resources and four
+  recipes as prompts beside its tools.
 
 ## Assumptions stated, not asked
 
