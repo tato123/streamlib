@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.0](https://github.com/tatolab/streamlib/compare/streamlib-moq-v0.1.6...streamlib-moq-v0.2.0) (2026-09-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **wheel:** keyword-argument configuration is deleted. A processor's `__init__` takes one `config` parameter annotated with its config class, or nothing beyond `self`; any other signature is refused at decoration.
+
+### Features
+
+* **wheel:** a Python processor's config is one class named by its __init__ annotation ([#2226](https://github.com/tatolab/streamlib/issues/2226)) ([9033ca9](https://github.com/tatolab/streamlib/commit/9033ca9b06fb292ae63f8a7d8d4a26a57d04e351))
+
 ## [0.1.6](https://github.com/tatolab/streamlib/compare/streamlib-moq-v0.1.5...streamlib-moq-v0.1.6) (2026-09-06)
 
 
