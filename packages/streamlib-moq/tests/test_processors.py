@@ -28,7 +28,13 @@ from streamlib import (
     output,
     processor,
 )
-from streamlib_moq import MoqBroadcastPublisher, MoqBroadcastSubscriber, _native
+from streamlib_moq import (
+    MoqBroadcastPublisher,
+    MoqBroadcastPublisherConfig,
+    MoqBroadcastSubscriber,
+    MoqBroadcastSubscriberConfig,
+    _native,
+)
 from streamlib_moq import processors as processors_module
 from streamlib_moq.processors import (
     BAGS_BETWEEN_PROGRESS_REPORTS,
@@ -55,7 +61,6 @@ from streamlib_moq.processors import (
     track_kind_of_bag,
     track_medium_of_codec,
 )
-
 A_RELAY = "https://relay.invalid/a-token"
 A_BROADCAST = "streamlib/a-broadcast"
 
@@ -186,12 +191,17 @@ def test_both_container_formats_are_addable(runtime, container_format):
 
 def test_a_container_format_this_wheel_does_not_write_is_refused_by_name():
     with pytest.raises(ValueError, match="container_format"):
-        MoqBroadcastPublisher(relay_url=A_RELAY, container_format="mpegts")  # type: ignore[arg-type]
+        MoqBroadcastPublisher(
+            MoqBroadcastPublisherConfig(
+                relay_url=A_RELAY,
+                container_format="mpegts",  # type: ignore[arg-type]
+            )
+        )
 
 
 def test_a_publisher_without_a_relay_is_refused_by_name():
     with pytest.raises(ValueError, match="relay_url"):
-        MoqBroadcastPublisher(relay_url="")
+        MoqBroadcastPublisher(MoqBroadcastPublisherConfig(relay_url=""))
 
 
 def test_the_relay_refusal_says_where_a_draft_16_token_goes():
@@ -199,14 +209,22 @@ def test_the_relay_refusal_says_where_a_draft_16_token_goes():
     path, so a bare host is not a usable endpoint and the message has to say
     so — there is nowhere else to learn it."""
     with pytest.raises(ValueError, match="token"):
-        MoqBroadcastSubscriber(relay_url="", broadcast=A_BROADCAST, video_track="1.m4s")
+        MoqBroadcastSubscriber(
+            MoqBroadcastSubscriberConfig(
+                relay_url="", broadcast=A_BROADCAST, video_track="1.m4s"
+            )
+        )
 
 
 def test_a_subscriber_naming_no_track_at_all_is_refused_by_name():
     """Three static output ports and no track named for any would subscribe to
     nothing and produce nothing, which reads from outside as a hang."""
     with pytest.raises(ValueError, match=r"video_track.*audio_track.*data_track"):
-        MoqBroadcastSubscriber(relay_url=A_RELAY, broadcast=A_BROADCAST)
+        MoqBroadcastSubscriber(
+            MoqBroadcastSubscriberConfig(
+                relay_url=A_RELAY, broadcast=A_BROADCAST
+            )
+        )
 
 
 @pytest.mark.parametrize("config", ["video_track", "audio_track", "data_track"])
@@ -215,12 +233,12 @@ def test_a_track_named_as_the_empty_string_is_refused_by_name_at_construction(co
     refusal is retried with backoff — so said here, or a config mistake reads
     from outside as a subscriber that never connects."""
     with pytest.raises(ValueError, match=config):
-        MoqBroadcastSubscriber(
+        MoqBroadcastSubscriber(MoqBroadcastSubscriberConfig(
             relay_url=A_RELAY,
             broadcast=A_BROADCAST,
             container_format="streamlib_bag",
             **{config: ""},
-        )
+        ))
 
 
 @pytest.mark.parametrize(
@@ -229,18 +247,18 @@ def test_a_track_named_as_the_empty_string_is_refused_by_name_at_construction(co
 )
 def test_one_name_given_to_two_tracks_is_refused_by_name_at_construction(first, second):
     with pytest.raises(ValueError, match=rf"{first}.*{second}"):
-        MoqBroadcastSubscriber(
+        MoqBroadcastSubscriber(MoqBroadcastSubscriberConfig(
             relay_url=A_RELAY,
             broadcast=A_BROADCAST,
             container_format="streamlib_bag",
             **{first: "both", second: "both"},
-        )
+        ))
 
 
 def test_a_subscriber_may_name_one_track_and_leave_the_other_ports_silent():
-    MoqBroadcastSubscriber(
+    MoqBroadcastSubscriber(MoqBroadcastSubscriberConfig(
         relay_url=A_RELAY, broadcast=A_BROADCAST, video_track="1.m4s"
-    )
+    ))
 
 
 def test_a_subscriber_naming_only_a_data_track_is_added_like_any_other(runtime):
@@ -259,14 +277,14 @@ def test_the_subscribers_data_bags_port_wires_to_a_processor_that_reads_it(runti
 
 
 def test_a_data_track_beside_both_media_tracks_is_accepted_under_streamlib_bag():
-    MoqBroadcastSubscriber(
+    MoqBroadcastSubscriber(MoqBroadcastSubscriberConfig(
         relay_url=A_RELAY,
         broadcast=A_BROADCAST,
         container_format="streamlib_bag",
         video_track="video",
         audio_track="audio",
         data_track="telemetry",
-    )
+    ))
 
 
 def test_a_data_track_under_cmaf_is_refused_by_name_at_construction():
@@ -274,7 +292,11 @@ def test_a_data_track_under_cmaf_is_refused_by_name_at_construction():
     `cmaf` — so a subscriber that named one and nothing else must hear it
     here, not as a broadcast that never produces."""
     with pytest.raises(ValueError, match=r"data_track.*cmaf"):
-        MoqBroadcastSubscriber(relay_url=A_RELAY, broadcast=A_BROADCAST, data_track="telemetry")
+        MoqBroadcastSubscriber(
+            MoqBroadcastSubscriberConfig(
+                relay_url=A_RELAY, broadcast=A_BROADCAST, data_track="telemetry"
+            )
+        )
 
 
 def test_the_documented_envelope_decodes_to_its_three_parts_with_the_bag_whole():
@@ -394,12 +416,12 @@ class _OutputsRecordingWrites:
 
 
 def _a_data_track_subscriber() -> MoqBroadcastSubscriber:
-    return MoqBroadcastSubscriber(
+    return MoqBroadcastSubscriber(MoqBroadcastSubscriberConfig(
         relay_url=A_RELAY,
         broadcast=A_BROADCAST,
         container_format="streamlib_bag",
         data_track="telemetry",
-    )
+    ))
 
 
 def _an_envelope_of(sequence_index: int) -> bytes:
@@ -468,7 +490,11 @@ def test_stop_says_what_the_data_track_wrote_and_lost_even_when_the_cadence_neve
 
 
 def test_a_subscriber_naming_no_data_track_says_nothing_about_one_at_stop():
-    subscriber = MoqBroadcastSubscriber(relay_url=A_RELAY, broadcast=A_BROADCAST, video_track="1.m4s")
+    subscriber = MoqBroadcastSubscriber(
+        MoqBroadcastSubscriberConfig(
+            relay_url=A_RELAY, broadcast=A_BROADCAST, video_track="1.m4s"
+        )
+    )
     said: "list[str]" = []
 
     with mock.patch.object(log, "info", said.append):
@@ -646,9 +672,9 @@ def test_a_bag_past_the_link_ceiling_is_reported_once_and_not_every_frame():
     subscriber that said nothing would look like a stream that just stopped —
     but saying it per frame would bury the log of a stream that never
     recovers."""
-    subscriber = MoqBroadcastSubscriber(
+    subscriber = MoqBroadcastSubscriber(MoqBroadcastSubscriberConfig(
         relay_url=A_RELAY, broadcast=A_BROADCAST, video_track="1.m4s"
-    )
+    ))
     bag = {**A_VIDEO_BAG, "bitstream": b"x" * (HELPER_LINK_PAYLOAD_CEILING_BYTES + 1)}
     said: "list[str]" = []
     with mock.patch.object(log, "error", said.append):
@@ -677,7 +703,11 @@ def test_a_delivery_deadline_that_is_not_a_count_of_milliseconds_is_refused_by_n
     """`bool` is an `int` in Python, so `True` would otherwise read as a
     one-millisecond deadline that sheds every frame but the sync points."""
     with pytest.raises(ValueError, match="delivery_deadline_ms"):
-        MoqBroadcastPublisher(relay_url=A_RELAY, delivery_deadline_ms=not_a_deadline)
+        MoqBroadcastPublisher(
+            MoqBroadcastPublisherConfig(
+                relay_url=A_RELAY, delivery_deadline_ms=not_a_deadline
+            )
+        )
 
 
 def test_a_run_that_shed_nothing_says_so_rather_than_saying_nothing():
@@ -836,7 +866,11 @@ class _SessionRecordingWhatWasPublished:
 def _a_streamlib_bag_publisher_over(
     session: _SessionRecordingWhatWasPublished,
 ) -> MoqBroadcastPublisher:
-    publisher = MoqBroadcastPublisher(relay_url=A_RELAY, container_format="streamlib_bag")
+    publisher = MoqBroadcastPublisher(
+        MoqBroadcastPublisherConfig(
+            relay_url=A_RELAY, container_format="streamlib_bag"
+        )
+    )
     publisher._session = session  # type: ignore[assignment]
     return publisher
 
@@ -860,7 +894,7 @@ class _SetupContextWiredTo:
 def _drive_bags_through(
     reaches_the_transport: bool, bag_count: int = 1
 ) -> "tuple[list[str], int]":
-    publisher = MoqBroadcastPublisher(relay_url=A_RELAY)
+    publisher = MoqBroadcastPublisher(MoqBroadcastPublisherConfig(relay_url=A_RELAY))
     session = _SessionThatAnswers(reaches_the_transport)
     publisher._session = session  # type: ignore[assignment]
     said: "list[str]" = []
@@ -1080,36 +1114,40 @@ def test_track_names_that_are_not_a_sequence_of_names_are_refused_by_name(not_na
     """A bare string is a `Sequence[str]` to Python, so it is refused by name
     rather than read as one track per character."""
     with pytest.raises(ValueError, match="track_names"):
-        MoqBroadcastPublisher(
+        MoqBroadcastPublisher(MoqBroadcastPublisherConfig(
             relay_url=A_RELAY, container_format="streamlib_bag", track_names=not_names
-        )
+        ))
 
 
 def test_track_names_unequal_in_count_to_the_inbound_links_are_refused_by_name_at_setup():
     """Links are known at `setup()` and not before, so the count is checked
     there — by the wheel's Rust, which is the one place the names are
     declared."""
-    publisher = MoqBroadcastPublisher(
+    publisher = MoqBroadcastPublisher(MoqBroadcastPublisherConfig(
         relay_url=A_RELAY, container_format="streamlib_bag", track_names=["video"]
-    )
+    ))
 
     with pytest.raises(ValueError, match="track_names"):
         publisher.setup(_SetupContextWiredTo(["encoder/video", "probe/telemetry"]))  # type: ignore[arg-type]
 
 
 def test_track_names_under_cmaf_are_refused_by_name_at_setup():
-    publisher = MoqBroadcastPublisher(relay_url=A_RELAY, track_names=["video"])
+    publisher = MoqBroadcastPublisher(
+        MoqBroadcastPublisherConfig(
+            relay_url=A_RELAY, track_names=["video"]
+        )
+    )
 
     with pytest.raises(ValueError, match="cmaf"):
         publisher.setup(_SetupContextWiredTo(["encoder/video"]))  # type: ignore[arg-type]
 
 
 def test_track_names_matching_the_links_are_declared_and_said_at_setup():
-    publisher = MoqBroadcastPublisher(
+    publisher = MoqBroadcastPublisher(MoqBroadcastPublisherConfig(
         relay_url=A_RELAY,
         container_format="streamlib_bag",
         track_names=["video", "telemetry"],
-    )
+    ))
     said: "list[str]" = []
     with mock.patch.object(log, "info", said.append):
         publisher.setup(_SetupContextWiredTo(["encoder/video", "probe/telemetry"]))  # type: ignore[arg-type]
@@ -1122,9 +1160,9 @@ def test_the_oversize_guard_charges_the_framed_encoded_bag_not_the_bitstream_alo
     the ceiling, so a bitstream just under it is still dropped — and a guard
     reading `len(bitstream)` would have stayed silent about it."""
     bag = {**A_VIDEO_BAG, "bitstream": b"\x00" * 100}
-    subscriber = MoqBroadcastSubscriber(
+    subscriber = MoqBroadcastSubscriber(MoqBroadcastSubscriberConfig(
         relay_url=A_RELAY, broadcast=A_BROADCAST, video_track="video"
-    )
+    ))
     said: "list[str]" = []
     with (
         mock.patch.object(processors_module, "HELPER_LINK_PAYLOAD_CEILING_BYTES", 150),
@@ -1142,9 +1180,9 @@ def test_the_oversize_guard_measures_the_framed_size_only_near_the_ceiling():
     """The exact measure is an encode of the whole bag on the reader thread,
     so a bag whose bitstream leaves it far under the ceiling is never
     encoded twice — the engine's own write is the only encode it gets."""
-    subscriber = MoqBroadcastSubscriber(
+    subscriber = MoqBroadcastSubscriber(MoqBroadcastSubscriberConfig(
         relay_url=A_RELAY, broadcast=A_BROADCAST, video_track="video"
-    )
+    ))
     outputs = _OutputsRecordingWrites()
     with mock.patch.object(
         processors_module, "encode_bag_to_msgpack_bytes"
@@ -1159,9 +1197,9 @@ def test_the_oversize_guard_measures_the_framed_size_only_near_the_ceiling():
 
 
 def test_the_oversize_guard_stops_measuring_once_it_has_reported():
-    subscriber = MoqBroadcastSubscriber(
+    subscriber = MoqBroadcastSubscriber(MoqBroadcastSubscriberConfig(
         relay_url=A_RELAY, broadcast=A_BROADCAST, video_track="video"
-    )
+    ))
     subscriber._reported_an_oversized_bag = True
     with mock.patch.object(
         processors_module, "encode_bag_to_msgpack_bytes"

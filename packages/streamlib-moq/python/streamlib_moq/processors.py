@@ -16,7 +16,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
 from streamlib import (
     EncodedAudioPacket,
@@ -528,6 +528,27 @@ def _optional_track_names(track_names: Any) -> "list[str] | None":
     return names
 
 
+@dataclass
+class MoqBroadcastPublisherConfig:
+    """What a `MoqBroadcastPublisher` is configured with."""
+
+    relay_url: Annotated[str, "The MoQ relay to publish through."]
+    broadcast: Annotated[
+        "str | None", "The namespace to publish under; minted when absent."
+    ] = None
+    container_format: Annotated[
+        ContainerFormat, "How each track is packaged on the wire."
+    ] = "cmaf"
+    delivery_deadline_ms: Annotated[
+        "int | None",
+        "How old a bag may be, by its own monotonic stamp, and still be published.",
+    ] = None
+    track_names: Annotated[
+        "Sequence[str] | None",
+        "Names the tracks positionally in wiring order; `streamlib_bag` only.",
+    ] = None
+
+
 @processor(
     description=(
         "Publishes encoded video, encoded audio and data bags to a MoQ "
@@ -542,9 +563,10 @@ class MoqBroadcastPublisher:
     for a bag with no `bitstream` key, data. A data track carries any bag at
     all, nested whole inside an object beside the publisher's own
     `sequence_index` and the bag's stamp, under `streamlib_bag` only. Its
-    settings are ordinary constructor parameters — `relay_url`, `broadcast`,
+    settings are a `MoqBroadcastPublisherConfig` — `relay_url`, `broadcast`,
     `container_format` and `track_names` — which is what
-    `rt.add(MoqBroadcastPublisher, config={"relay_url": ...})` passes.
+    `rt.add(MoqBroadcastPublisher, config={"relay_url": ...})` is constructed
+    into.
 
     `track_names`, under `streamlib_bag`, names the tracks positionally in
     wiring order — the order `runtime.connect` ran — so a subscriber in
@@ -593,21 +615,16 @@ class MoqBroadcastPublisher:
     throughput of about 40 Mbit/s at a 100 ms round trip to the relay.
     """
 
-    def __init__(
-        self,
-        relay_url: str,
-        broadcast: "str | None" = None,
-        container_format: ContainerFormat = "cmaf",
-        delivery_deadline_ms: "int | None" = None,
-        track_names: "Sequence[str] | None" = None,
-    ) -> None:
-        self._relay_url = _required_relay_url(relay_url, "MoqBroadcastPublisher")
-        self._broadcast = broadcast
+    def __init__(self, config: MoqBroadcastPublisherConfig) -> None:
+        self._relay_url = _required_relay_url(config.relay_url, "MoqBroadcastPublisher")
+        self._broadcast = config.broadcast
         self._container_format = _required_container_format(
-            container_format, "MoqBroadcastPublisher"
+            config.container_format, "MoqBroadcastPublisher"
         )
-        self._delivery_deadline_ms = _optional_delivery_deadline_ms(delivery_deadline_ms)
-        self._track_names = _optional_track_names(track_names)
+        self._delivery_deadline_ms = _optional_delivery_deadline_ms(
+            config.delivery_deadline_ms
+        )
+        self._track_names = _optional_track_names(config.track_names)
         self._session: "_native.MoqBroadcastPublishingSession | None" = None
         self._kind_by_inbound_link: "dict[str, str]" = {}
         self._next_data_sequence_index_by_inbound_link: "dict[str, int]" = {}
@@ -804,6 +821,26 @@ def _color_axes_of(frame: EncodedVideoFrame) -> "dict[str, str] | None":
     return stated or None
 
 
+@dataclass
+class MoqBroadcastSubscriberConfig:
+    """What a `MoqBroadcastSubscriber` is configured with."""
+
+    relay_url: Annotated[str, "The MoQ relay to subscribe through."]
+    broadcast: Annotated[str, "The namespace to subscribe to."]
+    video_track: Annotated[
+        "str | None", "The track feeding `encoded_video`; unnamed means no video."
+    ] = None
+    audio_track: Annotated[
+        "str | None", "The track feeding `encoded_audio`; unnamed means no audio."
+    ] = None
+    container_format: Annotated[
+        ContainerFormat, "How each track is packaged on the wire."
+    ] = "cmaf"
+    data_track: Annotated[
+        "str | None", "The track feeding `data_bags`; `streamlib_bag` only."
+    ] = None
+
+
 @processor(
     execution="manual",
     description=(
@@ -835,43 +872,46 @@ class MoqBroadcastSubscriber:
     would do with the same bytes.
     """
 
-    def __init__(
-        self,
-        relay_url: str,
-        broadcast: str,
-        video_track: "str | None" = None,
-        audio_track: "str | None" = None,
-        container_format: ContainerFormat = "cmaf",
-        data_track: "str | None" = None,
-    ) -> None:
-        self._relay_url = _required_relay_url(relay_url, "MoqBroadcastSubscriber")
-        if not isinstance(broadcast, str) or not broadcast:
+    def __init__(self, config: MoqBroadcastSubscriberConfig) -> None:
+        self._relay_url = _required_relay_url(
+            config.relay_url, "MoqBroadcastSubscriber"
+        )
+        if not isinstance(config.broadcast, str) or not config.broadcast:
             raise ValueError(
                 "MoqBroadcastSubscriber: `broadcast` is required and names the "
-                f"namespace to subscribe to; got {broadcast!r}"
+                f"namespace to subscribe to; got {config.broadcast!r}"
             )
-        if video_track is None and audio_track is None and data_track is None:
+        if (
+            config.video_track is None
+            and config.audio_track is None
+            and config.data_track is None
+        ):
             raise ValueError(
                 "MoqBroadcastSubscriber: name at least one of `video_track`, "
                 "`audio_track` and `data_track`; a subscriber naming none would "
                 "subscribe to nothing and produce nothing."
             )
         _refuse_track_names_no_broadcast_can_serve(
-            (("video_track", video_track), ("audio_track", audio_track), ("data_track", data_track))
+            (
+                ("video_track", config.video_track),
+                ("audio_track", config.audio_track),
+                ("data_track", config.data_track),
+            )
         )
         self._container_format = _required_container_format(
-            container_format, "MoqBroadcastSubscriber"
+            config.container_format, "MoqBroadcastSubscriber"
         )
-        if data_track is not None and self._container_format == "cmaf":
+        if config.data_track is not None and self._container_format == "cmaf":
             raise ValueError(
                 f"MoqBroadcastSubscriber: `data_track` names a data track "
-                f"({data_track!r}), and the `cmaf` container has no packaging for "
-                f"one; a data track rides `container_format=\"streamlib_bag\"` only."
+                f"({config.data_track!r}), and the `cmaf` container has no packaging "
+                "for one; a data track rides "
+                '`container_format="streamlib_bag"` only.'
             )
-        self._broadcast = broadcast
-        self._video_track = video_track
-        self._audio_track = audio_track
-        self._data_track = data_track
+        self._broadcast = config.broadcast
+        self._video_track = config.video_track
+        self._audio_track = config.audio_track
+        self._data_track = config.data_track
         self._stop = threading.Event()
         self._reader: "threading.Thread | None" = None
         self._reported_an_oversized_bag = False

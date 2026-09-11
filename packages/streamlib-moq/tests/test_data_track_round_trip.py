@@ -43,9 +43,14 @@ from typing import Any
 import pytest
 
 from streamlib import ProcessorLinkDataAccess, decode_msgpack_bytes_to_python_object
-from streamlib_moq import MoqBroadcastPublisher, MoqBroadcastSubscriber, _native
+from streamlib_moq import (
+    MoqBroadcastPublisher,
+    MoqBroadcastPublisherConfig,
+    MoqBroadcastSubscriber,
+    MoqBroadcastSubscriberConfig,
+    _native,
+)
 from streamlib_moq.processors import DATA_BAGS_OUTPUT_PORT, TRACKS_INPUT_PORT
-
 A_RELAY = "https://relay.invalid/a-token"
 A_BROADCAST = "streamlib/a-broadcast"
 THE_DATA_TRACK_NAME = "telemetry"
@@ -200,14 +205,18 @@ def data_track_round_trip(
     )
 
     publishing_session = _ThePublishingSessionKeepingWhatItWasHanded()
-    publisher = MoqBroadcastPublisher(relay_url=A_RELAY, container_format="streamlib_bag")
+    publisher = MoqBroadcastPublisher(
+        MoqBroadcastPublisherConfig(
+            relay_url=A_RELAY, container_format="streamlib_bag"
+        )
+    )
     publisher._session = publishing_session  # type: ignore[assignment]
-    subscriber = MoqBroadcastSubscriber(
+    subscriber = MoqBroadcastSubscriber(MoqBroadcastSubscriberConfig(
         relay_url=A_RELAY,
         broadcast=A_BROADCAST,
         container_format="streamlib_bag",
         data_track=THE_DATA_TRACK_NAME,
-    )
+    ))
 
     yield DataTrackRoundTripUnderTest(
         publisher,

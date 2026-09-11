@@ -10,6 +10,8 @@ like any other Python processor.
 """
 
 from .processors import WhepPlayer as WhepPlayer
+from .processors import WhepPlayerConfig as WhepPlayerConfig
 from .processors import WhipPublisher as WhipPublisher
+from .processors import WhipPublisherConfig as WhipPublisherConfig
 
-__all__ = ["WhepPlayer", "WhipPublisher"]
+__all__ = ["WhepPlayer", "WhepPlayerConfig", "WhipPublisher", "WhipPublisherConfig"]

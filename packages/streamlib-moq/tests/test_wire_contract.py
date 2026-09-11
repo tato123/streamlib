@@ -23,7 +23,7 @@ import pytest
 
 from streamlib import EncodedAudioPacket, EncodedVideoFrame, encode_bag_to_msgpack_bytes, log
 from streamlib._engine import ProcessorLinkDataAccess
-from streamlib_moq import MoqBroadcastSubscriber, _native
+from streamlib_moq import MoqBroadcastSubscriber, MoqBroadcastSubscriberConfig, _native
 from streamlib_moq.processors import (
     DATA_BAGS_OUTPUT_PORT,
     encoded_audio_packet_bag,
@@ -96,12 +96,12 @@ class OutputsWritingOverTheWiredLink:
 
 
 def a_data_track_subscriber() -> MoqBroadcastSubscriber:
-    return MoqBroadcastSubscriber(
+    return MoqBroadcastSubscriber(MoqBroadcastSubscriberConfig(
         relay_url="https://relay.invalid/a-token",
         broadcast="a-broadcast",
         container_format="streamlib_bag",
         data_track=DATA_TRACK,
-    )
+    ))
 
 
 def an_envelope_stating(**overrides: Any) -> bytes:
