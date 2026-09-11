@@ -171,7 +171,10 @@ def test_an_unresolvable_annotation_is_refused_where_the_author_can_see_it():
 
         @processor(execution="manual")
         class Blur:
-            def __init__(self, config: "NeverImported") -> None:  # noqa: F821
+            def __init__(
+                self,
+                config: "NeverImported",  # noqa: F821  # pyright: ignore[reportUndefinedVariable]
+            ) -> None:
                 self.config = config
 
 
@@ -185,18 +188,18 @@ def schema_of(config_class: "Optional[type]") -> "dict[str, Any]":
     if config_class is None:
 
         @processor(execution="manual")
-        class Subject:
+        class SubjectDeclaringNoConfig:
             def __init__(self) -> None:
                 self.seen = 0
 
-    else:
+        return SubjectDeclaringNoConfig.__streamlib_processor_config_schema__
 
-        @processor(execution="manual")
-        class Subject:  # type: ignore[no-redef]
-            def __init__(self, config: config_class) -> None:  # type: ignore[valid-type]
-                self.config = config
+    @processor(execution="manual")
+    class SubjectTakingAConfigClass:
+        def __init__(self, config: config_class) -> None:  # type: ignore[valid-type]
+            self.config = config
 
-    return Subject.__streamlib_processor_config_schema__
+    return SubjectTakingAConfigClass.__streamlib_processor_config_schema__
 
 
 def test_a_typed_dict_yields_its_annotations_and_its_required_keys():
