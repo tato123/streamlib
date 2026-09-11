@@ -86,13 +86,28 @@ def json_schema_for_a_processor_declaring_no_config() -> "dict[str, Any]":
 
 def derive_config_class_json_schema(config_class: type) -> "dict[str, Any]":
     """The JSON Schema of `config_class`, derived from what its author wrote."""
+    return _document_for_class(config_class, ())
+
+
+def _document_for_class(
+    config_class: type, classes_being_inlined: "tuple[type, ...]"
+) -> "dict[str, Any]":
+    if config_class in classes_being_inlined:
+        # A config class that reaches itself. Inlining is the only nesting this
+        # module emits, so a cycle has no fixed point — the walk stops here and
+        # the key says only that it is an object. Without this the recursion
+        # exhausts the stack at decoration, which is import time.
+        return {"type": "object"}
+
     model_json_schema = getattr(config_class, "model_json_schema", None)
     if callable(model_json_schema):
         return _document_the_model_carries(config_class, model_json_schema)
+
+    ancestry = classes_being_inlined + (config_class,)
     if is_a_typed_dict(config_class):
-        return _typed_dict_document(config_class)
+        return _typed_dict_document(config_class, ancestry)
     if dataclasses.is_dataclass(config_class):
-        return _dataclass_document(config_class)
+        return _dataclass_document(config_class, ancestry)
     # An open object says the configuration is a mapping and claims nothing
     # about its keys, which is all that can honestly be derived from a class of
     # a kind the deriver does not recognise.
@@ -116,13 +131,15 @@ def _document_the_model_carries(
     }
 
 
-def _typed_dict_document(config_class: type) -> "dict[str, Any]":
+def _typed_dict_document(
+    config_class: type, ancestry: "tuple[type, ...]"
+) -> "dict[str, Any]":
     annotations = _resolved_class_annotations(config_class)
     required_keys = getattr(config_class, "__required_keys__", frozenset())
     document: "dict[str, Any]" = {
         "type": "object",
         "properties": {
-            key: _json_schema_for_annotation(annotation)
+            key: _json_schema_for_annotation(annotation, ancestry)
             for key, annotation in annotations.items()
         },
     }
@@ -134,7 +151,9 @@ def _typed_dict_document(config_class: type) -> "dict[str, Any]":
     return document
 
 
-def _dataclass_document(config_class: type) -> "dict[str, Any]":
+def _dataclass_document(
+    config_class: type, ancestry: "tuple[type, ...]"
+) -> "dict[str, Any]":
     annotations = _resolved_class_annotations(config_class)
     properties: "dict[str, Any]" = {}
     required: "list[str]" = []
@@ -144,7 +163,7 @@ def _dataclass_document(config_class: type) -> "dict[str, Any]":
         if not field.init:
             continue
         field_schema = _json_schema_for_annotation(
-            annotations.get(field.name, field.type)
+            annotations.get(field.name, field.type), ancestry
         )
         has_default = field.default is not dataclasses.MISSING
         has_default_factory = field.default_factory is not dataclasses.MISSING
@@ -179,7 +198,9 @@ def _resolved_class_annotations(config_class: type) -> "dict[str, Any]":
         ) from unresolvable
 
 
-def _json_schema_for_annotation(annotation: Any) -> "dict[str, Any]":
+def _json_schema_for_annotation(
+    annotation: Any, ancestry: "tuple[type, ...]" = ()
+) -> "dict[str, Any]":
     """The schema of one annotated field.
 
     An annotation the deriver does not recognise renders as an empty schema
@@ -188,7 +209,7 @@ def _json_schema_for_annotation(annotation: Any) -> "dict[str, Any]":
     """
     metadata = getattr(annotation, "__metadata__", None)
     if metadata is not None:
-        described = _json_schema_for_annotation(typing.get_args(annotation)[0])
+        described = _json_schema_for_annotation(typing.get_args(annotation)[0], ancestry)
         description = next((entry for entry in metadata if isinstance(entry, str)), None)
         if description is not None:
             described["description"] = description
@@ -203,7 +224,7 @@ def _json_schema_for_annotation(annotation: Any) -> "dict[str, Any]":
     if origin is typing.Union or origin is types.UnionType:
         return {
             "anyOf": [
-                _json_schema_for_annotation(member)
+                _json_schema_for_annotation(member, ancestry)
                 for member in typing.get_args(annotation)
             ]
         }
@@ -211,7 +232,7 @@ def _json_schema_for_annotation(annotation: Any) -> "dict[str, Any]":
         return _enumerated_schema(typing.get_args(annotation))
     if origin is not None:
         if origin in _SEQUENCE_ORIGINS:
-            return _sequence_schema(annotation, origin)
+            return _sequence_schema(annotation, origin, ancestry)
         if origin in _MAPPING_ORIGINS:
             return {"type": "object"}
         # A parameterized generic the deriver does not know. This branch is
@@ -235,7 +256,7 @@ def _json_schema_for_annotation(annotation: Any) -> "dict[str, Any]":
         ):
             # Inlined rather than referenced: nothing here emits a `$ref`, so
             # no document carries a `$defs` for one to point into.
-            return derive_config_class_json_schema(annotation)
+            return _document_for_class(annotation, ancestry)
 
     return {}
 
@@ -247,21 +268,28 @@ def _enumerated_schema(members: "tuple[Any, ...]") -> "dict[str, Any]":
     return {"enum": rendered}
 
 
-def _sequence_schema(annotation: Any, origin: Any) -> "dict[str, Any]":
+def _sequence_schema(
+    annotation: Any, origin: Any, ancestry: "tuple[type, ...]"
+) -> "dict[str, Any]":
     document: "dict[str, Any]" = {"type": "array"}
     element_annotations = typing.get_args(annotation)
     if origin is tuple:
         # `tuple[T, ...]` is a homogeneous sequence; every other tuple is
         # positional, which 2020-12 spells `prefixItems`.
         if len(element_annotations) == 2 and element_annotations[1] is Ellipsis:
-            document["items"] = _json_schema_for_annotation(element_annotations[0])
+            document["items"] = _json_schema_for_annotation(
+                element_annotations[0], ancestry
+            )
         elif element_annotations:
             document["prefixItems"] = [
-                _json_schema_for_annotation(element) for element in element_annotations
+                _json_schema_for_annotation(element, ancestry)
+                for element in element_annotations
             ]
         return document
     if len(element_annotations) == 1:
-        document["items"] = _json_schema_for_annotation(element_annotations[0])
+        document["items"] = _json_schema_for_annotation(
+            element_annotations[0], ancestry
+        )
     return document
 
 

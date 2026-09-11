@@ -63,6 +63,26 @@ class NestedConfig:
     count: int = 0
 
 
+# At module scope, not inside their tests: `typing.get_type_hints` resolves a
+# class's forward references against its module's globals and never against an
+# enclosing function's locals, so a self-reference written in a test body cannot
+# resolve at all.
+@dataclasses.dataclass
+class TreeConfig:
+    child: "Optional[TreeConfig]" = None
+    depth: int = 0
+
+
+@dataclasses.dataclass
+class LeftConfig:
+    right: "Optional[RightConfig]" = None
+
+
+@dataclasses.dataclass
+class RightConfig:
+    left: "Optional[LeftConfig]" = None
+
+
 # ---------------------------------------------------------------------------
 # Declaration: which `__init__` signatures name a config class
 # ---------------------------------------------------------------------------
@@ -286,6 +306,68 @@ def test_an_annotation_the_deriver_does_not_know_renders_as_an_open_schema():
     assert document["properties"]["handle"] == {}
     assert document["properties"]["width"] == {"type": "integer", "default": 2}
     assert document["required"] == ["handle"], "an opaque field is still an input"
+
+
+def test_a_self_referential_config_class_stops_rather_than_exhausting_the_stack():
+    """Inlining is the only nesting the deriver emits, so a cycle has no fixed
+    point. Unrecognised, the walk runs out of stack at decoration — which is
+    import time, where the traceback names typing internals and not the class."""
+    document = schema_of(TreeConfig)
+
+    assert document["properties"]["child"]["anyOf"] == [
+        {"type": "object"},
+        {"type": "null"},
+    ]
+    assert document["properties"]["depth"] == {"type": "integer", "default": 0}
+
+
+def test_two_config_classes_that_reach_each_other_stop_at_the_second_pass():
+    left = schema_of(LeftConfig)["properties"]["right"]["anyOf"][0]
+
+    assert left["properties"]["left"]["anyOf"] == [{"type": "object"}, {"type": "null"}]
+
+
+def test_the_same_class_nested_twice_without_a_cycle_is_inlined_both_times():
+    """The guard is on an ancestry, not on a visited set: a diamond is not a
+    cycle and must not be truncated."""
+
+    @dataclasses.dataclass
+    class LeafConfig:
+        width: int = 1
+
+    @dataclasses.dataclass
+    class BranchConfig:
+        first: LeafConfig = dataclasses.field(default_factory=LeafConfig)
+        second: LeafConfig = dataclasses.field(default_factory=LeafConfig)
+
+    document = schema_of(BranchConfig)
+
+    assert document["properties"]["first"]["properties"]["width"]["type"] == "integer"
+    assert document["properties"]["second"]["properties"]["width"]["type"] == "integer"
+
+
+def test_a_frozen_slotted_dataclass_derives_like_any_other():
+    @dataclasses.dataclass(frozen=True)
+    class FrozenConfig:
+        width: int = 1
+
+    assert schema_of(FrozenConfig)["properties"]["width"] == {
+        "type": "integer",
+        "default": 1,
+    }
+
+
+def test_a_typed_dict_inheriting_another_carries_both_key_sets():
+    class BaseConfig(TypedDict):
+        width: int
+
+    class DerivedConfig(BaseConfig, total=False):
+        label: str
+
+    document = schema_of(DerivedConfig)
+
+    assert set(document["properties"]) == {"width", "label"}
+    assert document["required"] == ["width"]
 
 
 def test_a_processor_declaring_no_config_publishes_what_rust_publishes():
