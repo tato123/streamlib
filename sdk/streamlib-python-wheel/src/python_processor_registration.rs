@@ -129,7 +129,9 @@ pub(crate) fn register_processor_class(
 /// — has no identity to be registered under, and `rt.add` is where that is
 /// said, with the fix named.
 #[pyfunction]
-pub(crate) fn register_declared_processor_class(processor_class: &Bound<'_, PyAny>) -> PyResult<()> {
+pub(crate) fn register_declared_processor_class(
+    processor_class: &Bound<'_, PyAny>,
+) -> PyResult<()> {
     if std::env::var_os(HELPER_PROCESS_ENTRYPOINT_ENVIRONMENT_VARIABLE).is_some() {
         return Ok(());
     }
