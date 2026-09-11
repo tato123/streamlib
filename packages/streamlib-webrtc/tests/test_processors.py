@@ -244,9 +244,9 @@ def test_a_publisher_whose_endpoint_is_not_an_address_is_refused_by_name(
         _PublisherUnderTest.set_up_with(request, 1, config)
 
 
-def test_a_publisher_added_with_no_endpoint_at_all_is_refused_by_the_engine(request):
-    """`url` has no default, so the engine's own construction refusal names it
-    before any of this wheel's validation runs."""
+def test_a_publisher_added_with_no_endpoint_at_all_is_refused_by_its_config_class(request):
+    """`url` has no default, so the config class refuses the empty mapping and
+    names the missing key before any of this wheel's own validation runs."""
     with pytest.raises(TypeError, match="missing 1 required positional argument"):
         _PublisherUnderTest.set_up_with(request, 1, {})
 
