@@ -9,6 +9,12 @@ config type, so a node serves one dialect whichever language declared the
 processor. Nested classes are inlined and `Optional[T]` is an `anyOf` with null,
 so nothing here emits a `$ref` and no document needs a `$defs`.
 
+The dialect is shared; two spellings inside it are not, and both are valid
+2020-12. The Rust side writes a nullable as `"type": [T, "null"]` and stamps a
+root `title` from the config type's name, because `schemars` does. Neither is
+worth converting on either side, and a reader who takes one for drift would
+break the other.
+
 Stdlib only. A model is recognised by the `model_json_schema` method it carries
 rather than by importing pydantic, which the wheel does not depend on.
 
