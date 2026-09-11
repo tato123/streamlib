@@ -8,8 +8,12 @@ read an app's effects off a node that has only imported them. No runtime boots
 here: registration is a declaration-time fact, and the catalog is per process.
 """
 
+import json
+import os
+import subprocess
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +21,13 @@ from streamlib import processor
 from streamlib._engine import (
     processor_class_import_paths_registered_in_this_process,
 )
+
+HELPER_PROCESS_ENTRYPOINT_ENV = "STREAMLIB_ENTRYPOINT"
+
+# What a real helper imports and hosts — its own module, as every processor
+# class must be.
+PROCESSOR_MODULE_A_HELPER_HOSTS = "zero_argument_process_processor"
+PROCESSOR_A_HELPER_HOSTS = f"{PROCESSOR_MODULE_A_HELPER_HOSTS}:ZeroArgumentProcess"
 
 
 @processor(execution="manual", description="Declared here and added nowhere")
@@ -167,3 +178,50 @@ def test_an_explicit_description_outranks_the_docstring():
 def test_a_processor_with_neither_is_described_by_the_empty_string():
     """Never `None`: the descriptor's description is a string."""
     assert DescribedByNothingAtAll.__streamlib_processor_description__ == ""
+
+
+def _catalog_of_an_interpreter_carrying(environment: "dict[str, str]") -> "list[str]":
+    """The registry of a fresh interpreter that imported one processor module.
+
+    Out of process because the variable under test is read once per import and
+    the catalog is per process: neither can be faked by patching inside this one.
+    """
+    reporter = (
+        f"import {PROCESSOR_MODULE_A_HELPER_HOSTS}\n"
+        "import json\n"
+        "from streamlib._engine import "
+        "processor_class_import_paths_registered_in_this_process as registered\n"
+        "print(json.dumps(registered()))\n"
+    )
+    reported = subprocess.run(
+        [sys.executable, "-c", reporter],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(Path(__file__).parent),
+            **environment,
+        },
+    )
+    return json.loads(reported.stdout)
+
+
+def test_an_interpreter_that_is_not_a_helper_registers_what_it_imports():
+    """The control arm: the same import, without the helper's variable set."""
+    assert PROCESSOR_A_HELPER_HOSTS in _catalog_of_an_interpreter_carrying({})
+
+
+def test_an_interpreter_carrying_the_helper_entrypoint_registers_nothing():
+    """A helper hosts no graph, so it needs no catalog and builds none.
+
+    The variable is the spawn host's, set on every child it starts and nowhere
+    else — which is what makes its presence a reliable "I am a helper".
+    """
+    catalog = _catalog_of_an_interpreter_carrying(
+        {HELPER_PROCESS_ENTRYPOINT_ENV: PROCESSOR_A_HELPER_HOSTS}
+    )
+
+    assert PROCESSOR_A_HELPER_HOSTS not in catalog, (
+        f"a helper registered the class it hosts: {catalog}"
+    )
