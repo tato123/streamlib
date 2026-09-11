@@ -282,6 +282,18 @@ fn run_local_ci_gates(workspace_root: &Path) -> Result<()> {
             ],
         ),
         (
+            "the missing-JsonSchema-derive refusal (compile-fail)",
+            "cargo",
+            &[
+                "test",
+                "--locked",
+                "-p",
+                "streamlib-engine",
+                "--test",
+                "compile_fail_config_without_json_schema",
+            ],
+        ),
+        (
             "media built-ins unit tests",
             "cargo",
             &[

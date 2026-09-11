@@ -121,6 +121,14 @@ jobs:
           cargo test --locked -p streamlib -p streamlib-macros \
             -p streamlib-processor-schema --lib
           cargo test --locked -p streamlib-engine --test attribute_macro_test
+          # The compile-fail half of the same locks. The descriptor carries the
+          # config type's schema, so the derive is a requirement, and the note
+          # naming the fix is the only thing standing between an author and a
+          # bare trait-bound error. Nothing else in CI hands the compiler a
+          # config type without the derive. A compiler upgrade that reflows a
+          # diagnostic reddens here; `TRYBUILD=overwrite` refreshes it.
+          cargo test --locked -p streamlib-engine \
+            --test compile_fail_config_without_json_schema
           # The built-ins were reached by no cargo invocation here: the clippy
           # step above compiles default targets only, so it builds their lib and
           # never their test target. Their unit tests are the headless arm of

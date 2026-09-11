@@ -245,25 +245,4 @@ mod config_schema_document_tests {
             Some(&serde_json::json!([true]))
         );
     }
-
-    /// The refusal an author meets is the whole point of routing the bound
-    /// through this trait, and it lives in an attribute no test can call. This
-    /// reads the attribute's own source so that editing the note down to a
-    /// bare trait-bound error reddens here.
-    #[test]
-    fn the_missing_derive_note_names_the_derive_and_the_re_export_path() {
-        let source = include_str!("config_schema_document.rs");
-        let note_start = source
-            .find("note = \"add `#[derive(")
-            .expect("the missing-derive note");
-        let note = &source[note_start..];
-        assert!(note.starts_with(
-            "note = \"add `#[derive(streamlib::sdk::schemars::JsonSchema)]` \
-             and `#[schemars(crate = "
-        ));
-        assert!(
-            source.contains("so the crate needs no new dependency"),
-            "the note must say the crate adds no dependency"
-        );
-    }
 }
