@@ -77,6 +77,8 @@ __all__ = [
     "log_event",
     "monotonic_now_ns",
     "open_test_harness_channel",
+    "processor_class_import_paths_registered_in_this_process",
+    "register_declared_processor_class",
     "runtime_log_directory",
 ]
 
