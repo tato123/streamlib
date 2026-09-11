@@ -37,6 +37,7 @@ use streamlib::sdk::engine::video::decode::{
 };
 use streamlib::sdk::error::{Error, Result};
 use streamlib::sdk::rhi::{PixelBuffer, PixelFormat};
+use streamlib::sdk::schemars::JsonSchema;
 
 use crate::cumulative_count_report_threshold::CumulativeCountReportThreshold;
 use crate::encoded_stream_ordering::{ArrivingEncodedBagDisposition, EncodedStreamSyncPointGate};
@@ -61,7 +62,8 @@ const STREAM_RE_ENTRY_REPORT_INTERVAL: u64 = 20;
 /// absent, the extent is auto-detected from the stream's first SPS, which is
 /// what a decoder fed by an unknown producer wants. The DPB's slot count is
 /// the session surface's own and is not configurable here.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct HardwareVideoDecoderConfig {
     /// Upper bound on the coded width the DPB is allocated for. Absent:
     /// auto-detected from the first SPS.

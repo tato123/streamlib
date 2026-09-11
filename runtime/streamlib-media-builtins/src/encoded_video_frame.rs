@@ -26,10 +26,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::video_frame::ColorInfo;
+use streamlib::sdk::schemars::JsonSchema;
 
 /// Elementary-stream identity of an encoded frame's bitstream, spelled the
 /// way the wire spells it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub enum EncodedVideoCodec {
     #[serde(rename = "h264")]
     H264,

@@ -204,29 +204,16 @@ pub struct ProcessorDescriptorOutput {
     /// Entrypoint for non-Rust runtimes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<String>,
-    /// Reference to config schema.
+    /// The config type's JSON Schema, as JSON Schema draft 2020-12 — what an
+    /// agent reads to learn which keys this processor's config takes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config_schema: Option<String>,
+    pub config_schema: Option<serde_json::Value>,
     /// Input port descriptors.
     pub inputs: Vec<PortDescriptorOutput>,
     /// Output port descriptors.
     pub outputs: Vec<PortDescriptorOutput>,
     /// Code examples in different languages.
     pub examples: CodeExamplesOutput,
-}
-
-/// A configuration field for a processor.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, utoipa::ToSchema)]
-pub struct ConfigFieldOutput {
-    /// Field name.
-    pub name: String,
-    /// Field type as string (e.g., "String", "u32", "Option<PathBuf>").
-    #[serde(rename = "type")]
-    pub field_type: String,
-    /// Whether the field is required.
-    pub required: bool,
-    /// Human-readable description.
-    pub description: String,
 }
 
 /// Descriptor for a processor port.
@@ -431,17 +418,6 @@ impl From<&crate::core::ProcessorRuntime> for ProcessorRuntimeOutput {
         match runtime {
             crate::core::ProcessorRuntime::Rust => ProcessorRuntimeOutput::Rust,
             crate::core::ProcessorRuntime::Python => ProcessorRuntimeOutput::Python,
-        }
-    }
-}
-
-impl From<&crate::core::ConfigField> for ConfigFieldOutput {
-    fn from(field: &crate::core::ConfigField) -> Self {
-        Self {
-            name: field.name.clone(),
-            field_type: field.field_type.clone(),
-            required: field.required,
-            description: field.description.clone(),
         }
     }
 }
@@ -859,5 +835,55 @@ mod capability_extension_rendering_tests {
                 "distribution": "streamlib-webrtc",
             }])
         );
+    }
+}
+
+#[cfg(test)]
+mod config_schema_rendering_tests {
+    use super::*;
+    use crate::core::descriptors::{
+        ProcessorClassImportPath, ProcessorClassShortName, ProcessorDescriptor,
+    };
+
+    fn descriptor_carrying(config_schema: Option<serde_json::Value>) -> ProcessorDescriptor {
+        let descriptor = ProcessorDescriptor::new(
+            ProcessorClassShortName::new("TestPatternSource").unwrap(),
+            ProcessorClassImportPath::new("streamlib_media_builtins::test_pattern_source").unwrap(),
+            "a probe",
+        );
+        match config_schema {
+            Some(document) => descriptor.with_config_schema(document),
+            None => descriptor,
+        }
+    }
+
+    /// The control plane serves the descriptor's document, not a summary of
+    /// it: a field's type, its description and its default all survive the
+    /// hop, because the MCP catalog reads the same rendering.
+    #[test]
+    fn a_registered_descriptors_config_schema_reaches_the_rendering_unchanged() {
+        let document = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "width": { "type": "integer", "description": "Frame width in pixels.", "default": 1280 },
+                "height": { "type": "integer", "description": "Frame height in pixels.", "default": 720 },
+            },
+        });
+        let rendered = serde_json::to_value(ProcessorDescriptorOutput::from(&descriptor_carrying(
+            Some(document.clone()),
+        )))
+        .unwrap();
+        assert_eq!(rendered["config_schema"], document);
+    }
+
+    /// A descriptor built without one — every Python descriptor today —
+    /// renders no key at all rather than a null an agent would have to read
+    /// as "no config".
+    #[test]
+    fn a_descriptor_carrying_no_config_schema_renders_no_key_rather_than_a_null() {
+        let rendered =
+            serde_json::to_value(ProcessorDescriptorOutput::from(&descriptor_carrying(None)))
+                .unwrap();
+        assert!(rendered.get("config_schema").is_none(), "{rendered}");
     }
 }

@@ -8,9 +8,9 @@
 //! re-exports them here so every `crate::core::descriptors::*` path resolves
 //! unchanged.
 
+pub use streamlib_processor_schema::config_schema_document::ProcessorConfigJsonSchema;
 pub use streamlib_processor_schema::descriptors::{
-    CodeExamples, ConfigDescriptor, ConfigField, PortDescriptor, ProcessorDescriptor,
-    ProcessorRuntime,
+    CodeExamples, PortDescriptor, ProcessorDescriptor, ProcessorRuntime,
 };
 pub use streamlib_processor_schema::{
     AUDIO_WINDOW_CHANNELS_FOLLOWING_THE_SOURCE, AUDIO_WINDOW_DTYPE_DECLARATION_VALUES,

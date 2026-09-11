@@ -12,7 +12,7 @@
 //!     execution = manual,               // reactive | manual | continuous | continuous(interval_ms = 10)
 //!     scheduling = high,                // realtime | high | normal (default: normal)
 //!     unsafe_send,                      // flag — emit `unsafe impl Send`
-//!     config = crate::CameraConfig,     // Rust type path for the typed Config alias
+//!     config = crate::CameraConfig,     // typed Config alias; must derive `JsonSchema`
 //!     input("video_in", delivery_profile = "newest"),
 //!     output("video"),
 //! )]
@@ -77,7 +77,6 @@ pub struct ParsedProcessorAttr {
     pub unsafe_send: bool,
     pub config_type: Option<Path>,
     pub config_field_name: String,
-    pub config_schema_id: Option<String>,
     pub inputs: Vec<ParsedPort>,
     pub outputs: Vec<ParsedPort>,
 }
@@ -153,7 +152,6 @@ fn parse_body(input: ParseStream<'_>, struct_name: &str) -> syn::Result<ParsedPr
     let mut unsafe_send = false;
     let mut config_type: Option<Path> = None;
     let mut config_field_name: Option<String> = None;
-    let mut config_schema_id: Option<String> = None;
     let mut inputs: Vec<ParsedPort> = Vec::new();
     let mut outputs: Vec<ParsedPort> = Vec::new();
 
@@ -200,14 +198,6 @@ fn parse_body(input: ParseStream<'_>, struct_name: &str) -> syn::Result<ParsedPr
                 let lit: LitStr = input.parse()?;
                 config_field_name = Some(lit.value());
             }
-            "config_schema" => {
-                input.parse::<Token![=]>()?;
-                // Descriptor metadata only — accepts both the new-shape
-                // `@org/pkg/Type@version` and legacy reverse-DNS
-                // `<segments>.config@<version>` id grammars verbatim.
-                let lit: LitStr = input.parse()?;
-                config_schema_id = Some(lit.value());
-            }
             "type" => {
                 return Err(syn::Error::new(key.span(), class_path_rule()));
             }
@@ -241,15 +231,6 @@ fn parse_body(input: ParseStream<'_>, struct_name: &str) -> syn::Result<ParsedPr
         )
     })?;
 
-    // Name the config type when the author didn't spell an id out. Descriptor
-    // metadata only — nothing resolves it.
-    if config_schema_id.is_none()
-        && let Some(path) = &config_type
-        && let Some(last) = path.segments.last()
-    {
-        config_schema_id = Some(last.ident.to_string());
-    }
-
     let config_field_name = config_field_name.unwrap_or_else(|| "config".to_string());
 
     Ok(ParsedProcessorAttr {
@@ -260,7 +241,6 @@ fn parse_body(input: ParseStream<'_>, struct_name: &str) -> syn::Result<ParsedPr
         unsafe_send,
         config_type,
         config_field_name,
-        config_schema_id,
         inputs,
         outputs,
     })
@@ -648,7 +628,6 @@ const PROCESSOR_ATTRIBUTE_KEYS: &[&str] = &[
     "unsafe_send",
     "config",
     "config_field",
-    "config_schema",
     "description",
     "input",
     "output",
@@ -807,37 +786,34 @@ mod tests {
     }
 
     #[test]
-    fn config_type_and_synthesized_schema_id() {
+    fn a_config_key_binds_the_type_and_the_default_field_name() {
         let parsed = parse_ok(quote! {
             execution = manual,
             config = crate::camera_config::CameraConfig,
         });
         assert!(parsed.config_type.is_some());
         assert_eq!(parsed.config_field_name, "config");
-        // The synthesized config-schema id is version-free.
-        assert_eq!(parsed.config_schema_id.as_deref(), Some("CameraConfig"));
     }
 
     #[test]
-    fn explicit_config_schema_overrides_synthesis() {
-        let parsed = parse_ok(quote! {
-            execution = reactive,
-            config = crate::BufferRechunkerConfig,
-            config_schema = "com.tatolab.buffer_rechunker.config@1.0.0",
-        });
-        assert_eq!(
-            parsed.config_schema_id.as_deref(),
-            Some("com.tatolab.buffer_rechunker.config@1.0.0")
-        );
-    }
-
-    #[test]
-    fn no_config_has_no_schema_id() {
+    fn a_processor_declaring_no_config_binds_no_config_type() {
         let parsed = parse_ok(quote! {
             execution = manual,
         });
         assert!(parsed.config_type.is_none());
-        assert!(parsed.config_schema_id.is_none());
+    }
+
+    #[test]
+    fn the_retired_config_schema_key_is_refused_by_name_with_the_keys_that_remain() {
+        let msg = parse_err(quote! {
+            execution = reactive,
+            config = crate::BufferRechunkerConfig,
+            config_schema = "com.tatolab.buffer_rechunker.config@1.0.0",
+        });
+        assert!(
+            msg.contains("`config_schema`") && msg.contains("`config`"),
+            "the error must name the retired key and list the ones that remain: {msg}"
+        );
     }
 
     #[test]

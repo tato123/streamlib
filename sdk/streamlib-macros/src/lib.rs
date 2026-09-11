@@ -11,14 +11,13 @@
 //!   its expansion site.
 
 mod codegen;
-mod config_descriptor;
 mod grammar;
 
 use grammar as attribute_grammar;
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{DeriveInput, ItemStruct, parse_macro_input};
+use syn::{ItemStruct, parse_macro_input};
 
 /// Main processor attribute macro.
 ///
@@ -59,7 +58,6 @@ pub fn processor(attr: TokenStream, item: TokenStream) -> TokenStream {
         &schema,
         parsed.config_type.as_ref(),
         config_field_name.as_deref(),
-        parsed.config_schema_id.as_deref(),
         sdk_root(),
     );
 
@@ -95,40 +93,4 @@ fn sdk_root() -> proc_macro2::TokenStream {
     }
     // In-engine macro use: `extern crate self as streamlib` resolves this.
     quote! { ::streamlib::sdk }
-}
-
-/// Derive macro for ConfigDescriptor trait.
-///
-/// Generates a `ConfigDescriptor` implementation for config structs,
-/// enabling automatic config field metadata extraction for processor descriptors.
-///
-/// # Field Handling
-///
-/// - `Option<T>` fields are marked as `required: false`
-/// - All other fields are marked as `required: true`
-/// - Doc comments on fields become the `description`
-///
-/// # Example
-///
-/// ```ignore
-/// use streamlib::sdk::ConfigDescriptor;
-///
-/// #[derive(ConfigDescriptor)]
-/// pub struct CameraConfig {
-///     /// Camera device identifier
-///     pub device_id: Option<String>,
-///     /// Target width in pixels
-///     pub width: u32,
-///     /// Target height in pixels
-///     pub height: u32,
-/// }
-/// ```
-#[proc_macro_derive(ConfigDescriptor)]
-pub fn derive_config_descriptor(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-
-    match config_descriptor::derive_config_descriptor(input) {
-        Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
-    }
 }

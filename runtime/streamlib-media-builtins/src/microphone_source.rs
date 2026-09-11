@@ -23,6 +23,7 @@ use streamlib::sdk::context::{
 use streamlib::sdk::error::{Error, Result};
 use streamlib::sdk::iceoryx2::OutputWriter;
 use streamlib::sdk::processors::ManualProcessor;
+use streamlib::sdk::schemars::JsonSchema;
 
 use crate::audio_block::{AudioBlock, AudioSampleDtype};
 use crate::captured_audio_block_hand_off_ring::{
@@ -64,7 +65,8 @@ const AUDIO_OUTPUT_PORT: &str = "audio";
 const PUBLISH_THREAD_EXIT_GRACE: Duration = Duration::from_secs(2);
 
 /// Configuration for [`MicrophoneSource`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct MicrophoneSourceConfig {
     /// Backend-named capture device. Absent: the backend's default device.
     /// A name the backend cannot open raises rather than landing on a

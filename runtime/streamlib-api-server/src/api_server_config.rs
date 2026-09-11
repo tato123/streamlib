@@ -5,9 +5,11 @@
 //! pinned at.
 
 use serde::{Deserialize, Serialize};
+use streamlib::sdk::schemars::JsonSchema;
 
 /// Configuration for the runtime API server.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct ApiServerConfig {
     /// Host address to bind to.
     pub host: String,

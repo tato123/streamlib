@@ -282,6 +282,18 @@ fn run_local_ci_gates(workspace_root: &Path) -> Result<()> {
             ],
         ),
         (
+            "the missing-JsonSchema-derive refusal (compile-fail)",
+            "cargo",
+            &[
+                "test",
+                "--locked",
+                "-p",
+                "streamlib-engine",
+                "--test",
+                "compile_fail_config_without_json_schema",
+            ],
+        ),
+        (
             "media built-ins unit tests",
             "cargo",
             &[
@@ -375,6 +387,8 @@ fn run_local_ci_gates(workspace_root: &Path) -> Result<()> {
                 "core::json_schema::port_rendering_tests::port_info_output_renders_exactly_the_declared_keys",
                 "core::json_schema::port_rendering_tests::port_info_output_carries_no_type_key_under_any_spelling",
                 "core::json_schema::port_rendering_tests::port_descriptor_output_carries_no_type_key",
+                "core::json_schema::config_schema_rendering_tests::a_registered_descriptors_config_schema_reaches_the_rendering_unchanged",
+                "core::json_schema::config_schema_rendering_tests::a_descriptor_carrying_no_config_schema_renders_no_key_rather_than_a_null",
                 "core::json_schema::port_rendering_tests::a_contract_bearing_port_renders_its_contract_beside_the_four",
                 "core::json_schema::port_rendering_tests::a_port_declaring_the_sentinel_renders_it_as_a_whole_contract",
                 "core::json_schema::port_rendering_tests::a_declared_contract_survives_the_descriptor_to_port_info_hop",

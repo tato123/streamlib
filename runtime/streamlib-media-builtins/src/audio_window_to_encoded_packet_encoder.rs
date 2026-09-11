@@ -25,6 +25,7 @@
 
 use serde::{Deserialize, Serialize};
 use streamlib::sdk::error::{Error, Result};
+use streamlib::sdk::schemars::JsonSchema;
 
 use crate::audio_block::{AudioBlock, AudioSampleDtype};
 use crate::encoded_audio_packet::{EncodedAudioCodec, EncodedAudioPacket};
@@ -51,7 +52,8 @@ const MULTISTREAM_PACKET_FRAMING_HEADROOM_BYTES: usize = 256;
 
 /// Which libopus tuning an [`OpusEncoderConfig`] asks for, spelled the way
 /// the wire spells it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub enum OpusEncoderApplication {
     /// Broadcast and high fidelity: the decoded audio should be as close as
     /// possible to the input. The default, because a recording rung wants
@@ -86,7 +88,8 @@ impl OpusEncoderApplication {
 /// redundancy a recording never reads, and DTX replaces silence with nothing
 /// — a gap the plan's own doctrine says must stay derivable from the stamps
 /// rather than be invented back by a decoder.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct OpusEncoderConfig {
     /// Target bitrate in bits per second. Absent, libopus picks its own from
     /// the sample rate and channel count.

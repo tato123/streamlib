@@ -5,10 +5,12 @@
 //! pinned at.
 
 use serde::{Deserialize, Serialize};
+use streamlib::sdk::schemars::JsonSchema;
 
 /// Compute-kernel CPU-reference fixture: buffer length and where to write the
 /// comparison result.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct ComputeKernelTestProcessorConfig {
     pub element_count: u32,
     pub output_path: String,
@@ -16,7 +18,8 @@ pub struct ComputeKernelTestProcessorConfig {
 
 /// Concurrent-escalate fixture: how many threads contend and how long each
 /// holds the gate.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct ConcurrentEscalateTestProcessorConfig {
     pub hold_ms: u32,
     pub output_path: String,
@@ -24,13 +27,15 @@ pub struct ConcurrentEscalateTestProcessorConfig {
 }
 
 /// Escalate smoke fixture: where to record that the round trip completed.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct EscalateSmokeTestProcessorConfig {
     pub output_path: String,
 }
 
 /// GPU-acquire fixture: the pixel-buffer dimensions to acquire.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct GpuAcquireTestProcessorConfig {
     pub height: u32,
     pub output_path: String,
@@ -38,39 +43,45 @@ pub struct GpuAcquireTestProcessorConfig {
 }
 
 /// Graphics-kernel smoke fixture: where to record that the render completed.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct GraphicsKernelSmokeTestProcessorConfig {
     pub output_path: String,
 }
 
 /// Lifecycle-probe fixture: how many process iterations to run and where to
 /// append the per-hook markers.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct LifecycleProbeProcessorConfig {
     pub max_iterations: u32,
     pub output_path: String,
 }
 
 /// Panic-injection Continuous fixture: which lifecycle hook panics.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct PanickingContinuousLifecycleProcessorConfig {
     pub panic_at_hook: String,
 }
 
 /// Panic-injection Manual fixture: which lifecycle hook panics.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct PanickingManualLifecycleProcessorConfig {
     pub panic_at_hook: String,
 }
 
 /// Ray-tracing-kernel smoke fixture: where to record that the trace completed.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct RayTracingKernelSmokeTestProcessorConfig {
     pub output_path: String,
 }
 
 /// Attribute-macro config-emit fixture: one scalar field to round-trip.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct TestConfiguredProcessorConfig {
     pub threshold: f32,
 }

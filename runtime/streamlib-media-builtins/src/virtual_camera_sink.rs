@@ -40,6 +40,7 @@ use streamlib::sdk::engine::host_rhi::{
 use streamlib::sdk::error::{Error, Result};
 use streamlib::sdk::processors::ReactiveProcessor;
 use streamlib::sdk::rhi::{PixelFormat, RhiColorConverter, VulkanLayout};
+use streamlib::sdk::schemars::JsonSchema;
 
 use crate::cumulative_count_report_threshold::CumulativeCountReportThreshold;
 use crate::v4l2_color::resolved_color_to_v4l2_color;
@@ -106,7 +107,8 @@ const V4L2_PIX_FMT_PRIV_MAGIC: u32 = v4l::v4l_sys::V4L2_PIX_FMT_PRIV_MAGIC;
 const WRITE_FAILURE_REPORT_STEP: u64 = 300;
 
 /// Which door a [`VirtualCameraSink`] takes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 #[serde(rename_all = "snake_case")]
 pub enum VirtualCameraDoor {
     /// The loopback door when the control node is writable, else PipeWire.
@@ -121,7 +123,8 @@ pub enum VirtualCameraDoor {
 }
 
 /// Configuration for [`VirtualCameraSink`].
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct VirtualCameraSinkConfig {
     /// The camera's name in every picker. Absent: `StreamLib Camera` plus a
     /// short id that is unique per instance and app and stable across runs.

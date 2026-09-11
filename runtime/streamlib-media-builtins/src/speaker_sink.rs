@@ -28,6 +28,7 @@ use streamlib::sdk::context::{
 use streamlib::sdk::error::{Error, Result};
 use streamlib::sdk::iceoryx2::{AudioWindowContractMatchingADeviceStream, InputMailboxes};
 use streamlib::sdk::processors::ManualProcessor;
+use streamlib::sdk::schemars::JsonSchema;
 
 use crate::audio_block::AudioBlock;
 use crate::audio_samples_awaiting_playback_ring::{
@@ -83,7 +84,8 @@ const AUDIO_INPUT_PORT: &str = "audio";
 const DRAIN_THREAD_EXIT_GRACE: Duration = Duration::from_secs(2);
 
 /// Configuration for [`SpeakerSink`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct SpeakerSinkConfig {
     /// Backend-named playback device. Absent: the backend's default device.
     /// A name the backend cannot open raises rather than landing on a

@@ -9,6 +9,8 @@
 //! intentionally does not register the processor in the global
 //! `PROCESSOR_REGISTRY`.
 
+use serde::{Deserialize, Serialize};
+use streamlib::sdk::schemars::JsonSchema;
 use streamlib_engine::core::GeneratedProcessor;
 use streamlib_engine::core::{EmptyConfig, Result, RuntimeContextFullAccess};
 
@@ -86,20 +88,100 @@ fn test_processor_instantiation() {
 }
 
 #[test]
-fn empty_config_is_a_tolerant_bag() {
-    // config-as-bag: a no-config processor's `EmptyConfig` deserializes from
-    // any named map, discarding unknown / forward-compat keys, and serializes
-    // back as an empty named map. Mentally revert the custom EmptyConfig serde
-    // impls and this fails (a unit struct rejects a map).
-    let from_populated: EmptyConfig =
-        serde_json::from_value(serde_json::json!({ "leftover": 1, "future": true })).unwrap();
-    let processor = TestProcessor::Processor::from_config(from_populated).unwrap();
-    assert_eq!(processor.name(), "TestProcessor");
+fn a_processor_declaring_no_config_takes_none_and_says_which_key_had_nowhere_to_go() {
+    let refusal = serde_json::from_value::<EmptyConfig>(serde_json::json!({ "leftover": 1 }))
+        .expect_err("a populated configuration must be refused, not discarded");
+    assert!(
+        refusal.to_string().contains("leftover"),
+        "the refusal must name the key with nowhere to go: {refusal}"
+    );
 
+    // The two shapes a no-config processor is legitimately added with: the
+    // empty named map `ProcessorSpec` serializes, and the legacy `nil`.
     let from_empty: EmptyConfig = serde_json::from_value(serde_json::json!({})).unwrap();
     assert_eq!(
         serde_json::to_value(from_empty).unwrap(),
         serde_json::json!({})
+    );
+    serde_json::from_value::<EmptyConfig>(serde_json::Value::Null)
+        .expect("a nil configuration is still no configuration");
+
+    let processor = TestProcessor::Processor::from_config(EmptyConfig).unwrap();
+    assert_eq!(processor.name(), "TestProcessor");
+}
+
+#[test]
+fn a_processor_declaring_no_config_publishes_an_empty_object_schema() {
+    let descriptor = TestProcessor::Processor::descriptor().expect("a descriptor");
+    let config_schema = descriptor
+        .config_schema
+        .expect("every macro-emitted descriptor carries a document");
+    assert_eq!(config_schema["type"], "object");
+    assert_eq!(config_schema["additionalProperties"], false);
+    assert!(config_schema.get("properties").is_none());
+}
+
+/// Configuration for [`ConfiguredProbeProcessor`] — the shape the emitted
+/// document is read back from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
+pub struct ConfiguredProbeProcessorConfig {
+    /// Frame width in pixels.
+    #[serde(default = "default_probe_width")]
+    pub width: u32,
+    /// Where the recording is written.
+    pub path: String,
+}
+
+fn default_probe_width() -> u32 {
+    1280
+}
+
+impl Default for ConfiguredProbeProcessorConfig {
+    fn default() -> Self {
+        Self {
+            width: default_probe_width(),
+            path: String::new(),
+        }
+    }
+}
+
+#[streamlib::sdk::processor(
+    execution = manual,
+    config = crate::ConfiguredProbeProcessorConfig,
+    output("video_out"),
+)]
+pub struct ConfiguredProbeProcessor;
+
+impl streamlib_engine::ManualProcessor for ConfiguredProbeProcessor::Processor {
+    fn start(&mut self, _ctx: &RuntimeContextFullAccess<'_>) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn the_descriptor_carries_the_config_types_schema_rather_than_its_name() {
+    let descriptor = ConfiguredProbeProcessor::Processor::descriptor().expect("a descriptor");
+    let config_schema = descriptor
+        .config_schema
+        .expect("a configured processor carries its config type's document");
+
+    assert_eq!(config_schema["properties"]["width"]["type"], "integer");
+    assert_eq!(
+        config_schema["properties"]["width"]["description"],
+        "Frame width in pixels."
+    );
+    assert_eq!(config_schema["properties"]["width"]["default"], 1280);
+    assert_eq!(
+        config_schema["required"],
+        serde_json::json!(["path"]),
+        "a field serde declares no default for is the only required one"
+    );
+    // The retired id grammar named the type; the document describes it.
+    assert!(config_schema.get("$schema").is_none());
+    assert_ne!(
+        config_schema,
+        serde_json::json!("ConfiguredProbeProcessorConfig")
     );
 }
 

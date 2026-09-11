@@ -30,6 +30,7 @@ use streamlib::sdk::processor_owned_window::{
     SurfaceNamedForPresentationOnOwnedWindow,
 };
 use streamlib::sdk::processors::ManualProcessor;
+use streamlib::sdk::schemars::JsonSchema;
 use streamlib::sdk::window_event_pump::WindowRegistrationRequestFromOwningProcessor;
 
 use crate::video_frame::{ColorInfo, VideoFrame};
@@ -44,7 +45,8 @@ const DISPLAY_RENDER_THREAD_IDLE_PARK_INTERVAL: Duration = Duration::from_millis
 const DEGRADED_DISPLAY_DRAIN_PARK_INTERVAL: Duration = Duration::from_millis(2);
 
 /// How the frame maps onto the window, as configuration vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayScaling {
     /// Whole frame visible, black bars fill the rest.
@@ -67,7 +69,8 @@ impl DisplayScaling {
 }
 
 /// Configuration for [`DisplayWindow`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "streamlib::sdk::schemars")]
 pub struct DisplayWindowConfig {
     /// Window title.
     #[serde(default = "default_title")]

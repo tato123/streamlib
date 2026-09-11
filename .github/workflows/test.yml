@@ -121,6 +121,14 @@ jobs:
           cargo test --locked -p streamlib -p streamlib-macros \
             -p streamlib-processor-schema --lib
           cargo test --locked -p streamlib-engine --test attribute_macro_test
+          # The compile-fail half of the same locks. The descriptor carries the
+          # config type's schema, so the derive is a requirement, and the note
+          # naming the fix is the only thing standing between an author and a
+          # bare trait-bound error. Nothing else in CI hands the compiler a
+          # config type without the derive. A compiler upgrade that reflows a
+          # diagnostic reddens here; `TRYBUILD=overwrite` refreshes it.
+          cargo test --locked -p streamlib-engine \
+            --test compile_fail_config_without_json_schema
           # The built-ins were reached by no cargo invocation here: the clippy
           # step above compiles default targets only, so it builds their lib and
           # never their test target. Their unit tests are the headless arm of
@@ -195,6 +203,11 @@ jobs:
           # builder writes, so moving one without the other reddens here rather
           # than on the rig. It gates the two values agreeing, not the emitted
           # VUI — the dB that a disagreement costs is rig-measured.
+          # The config-schema entries are the only gate the descriptor's
+          # config slot has on the way to the control plane: that the
+          # document reaches the rendering unchanged, and that a descriptor
+          # built without one renders no key rather than a null. Pure serde —
+          # the seam an agent reads a processor's config shape through.
           # Named one by one rather than by module prefix: a prefix would
           # enrol whatever that module holds next, which is how a device test
           # joins this list without anyone deciding to add it.
@@ -275,6 +288,8 @@ jobs:
             core::json_schema::port_rendering_tests::port_info_output_renders_exactly_the_declared_keys \
             core::json_schema::port_rendering_tests::port_info_output_carries_no_type_key_under_any_spelling \
             core::json_schema::port_rendering_tests::port_descriptor_output_carries_no_type_key \
+            core::json_schema::config_schema_rendering_tests::a_registered_descriptors_config_schema_reaches_the_rendering_unchanged \
+            core::json_schema::config_schema_rendering_tests::a_descriptor_carrying_no_config_schema_renders_no_key_rather_than_a_null \
             core::json_schema::port_rendering_tests::a_contract_bearing_port_renders_its_contract_beside_the_four \
             core::json_schema::port_rendering_tests::a_port_declaring_the_sentinel_renders_it_as_a_whole_contract \
             core::json_schema::port_rendering_tests::a_declared_contract_survives_the_descriptor_to_port_info_hop \
