@@ -1656,12 +1656,12 @@ def processor_class_import_paths_in_this_processes_catalog() -> list[str]:
     """Every processor class import path in the calling process's catalog.
 
     What `GET /api/registry` renders, readable in a process that serves no
-    control plane — which a helper process is. A path appears here from the
-    moment its `@processor` decorator runs, whether or not anything has added
-    it, so a path listed here may be one the engine cannot yet construct.
-
-    The wheel's own suites read it to see a helper's catalog from inside one;
-    an app reads the control plane instead.
+    control plane — which a helper process is. In the app process a path
+    appears here the moment its `@processor` decorator runs, whether or not
+    anything has added it, so a path listed here may be one the engine cannot
+    yet construct. In a helper nothing appears, because decoration registers
+    nothing there — and seeing that from inside one is what the wheel's own
+    suites read this for.
     """
 
 def monotonic_now_ns() -> int:
