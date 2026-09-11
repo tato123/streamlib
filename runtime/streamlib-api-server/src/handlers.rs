@@ -779,6 +779,11 @@ mod router_surface_and_auth_gate_tests {
         }
     }
 
+    /// `/api/registry` reads the process-global registry, so this registers a
+    /// probe under a path no other test names and asserts on that path alone.
+    /// There is no teardown: a registration is for the life of the process, and
+    /// the registry refuses a second one of the same path.
+    ///
     /// `/api/registry` is where an agent learns which keys a processor's
     /// config takes, so it serves the descriptor's schema document itself —
     /// each field's type, its description and its default — rather than a

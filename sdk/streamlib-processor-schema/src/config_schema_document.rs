@@ -4,11 +4,18 @@
 //! The JSON Schema a processor descriptor carries for its config type.
 //!
 //! One dialect leaves this seam: JSON Schema draft 2020-12 with no `$schema`
-//! key. `schemars` 0.8 emits draft-07, whose only difference in what it
-//! produces is the `definitions` keyword and the `#/definitions/` references
-//! that point into it, so the rewrite below is the whole of the conversion.
+//! key. `schemars` 0.8 emits draft-07, and the conversion is three things:
+//! the meta-schema key and the pointer prefix, which the generator's own
+//! settings decide; the root keyword `definitions`, which `RootSchema`
+//! hard-codes; and a tuple field's positional item schemas, which draft-07
+//! spells as an array-valued `items`.
 
+use schemars::schema::{SchemaObject, SingleOrVec};
+use schemars::visit::{Visitor, visit_schema_object};
 use serde_json::Value;
+
+/// Where a `$ref` points in a 2020-12 document.
+const DEFINITION_POINTER_PREFIX: &str = "#/$defs/";
 
 /// Marks a type usable as a processor's `config =` type, and derives its
 /// schema document.
@@ -28,43 +35,80 @@ pub trait ProcessorConfigJsonSchema {
 
 impl<T: schemars::JsonSchema> ProcessorConfigJsonSchema for T {
     fn processor_config_schema_document() -> Value {
-        let draft_07_document = serde_json::to_value(
-            schemars::r#gen::SchemaGenerator::default().into_root_schema_for::<T>(),
-        )
-        .expect("a schemars root schema always serializes");
-        rewrite_draft_07_document_as_2020_12(draft_07_document)
+        let root_schema = schemars::r#gen::SchemaSettings::draft07()
+            .with(|settings| {
+                settings.meta_schema = None;
+                settings.definitions_path = DEFINITION_POINTER_PREFIX.to_string();
+            })
+            .with_visitor(TupleItemsRewrittenAsPrefixItems)
+            .into_generator()
+            .into_root_schema_for::<T>();
+
+        let mut document =
+            serde_json::to_value(root_schema).expect("a schemars root schema always serializes");
+        rename_the_root_definitions_keyword_to_defs(&mut document);
+        document
     }
 }
 
-/// Rewrite a schemars draft-07 document as draft 2020-12.
-fn rewrite_draft_07_document_as_2020_12(mut document: Value) -> Value {
-    if let Some(root_object) = document.as_object_mut() {
-        root_object.remove("$schema");
-        if let Some(definitions) = root_object.remove("definitions") {
-            root_object.insert("$defs".to_string(), definitions);
-        }
+/// `RootSchema` serializes its definitions map under the draft-07 keyword
+/// whatever the generator's pointer prefix says, so the root key is renamed
+/// here to match the `#/$defs/` the references already carry.
+fn rename_the_root_definitions_keyword_to_defs(document: &mut Value) {
+    if let Some(root_object) = document.as_object_mut()
+        && let Some(definitions) = root_object.remove("definitions")
+    {
+        root_object.insert("$defs".to_string(), definitions);
     }
-    rewrite_definitions_references(&mut document);
-    document
 }
 
-/// Repoint every `#/definitions/…` reference at `#/$defs/…`, at any depth.
-fn rewrite_definitions_references(node: &mut Value) {
-    match node {
-        Value::Object(members) => {
-            for (key, value) in members.iter_mut() {
-                if key == "$ref"
-                    && let Some(reference) = value.as_str()
-                    && let Some(definition_name) = reference.strip_prefix("#/definitions/")
-                {
-                    *value = Value::String(format!("#/$defs/{definition_name}"));
-                    continue;
-                }
-                rewrite_definitions_references(value);
+/// Rewrites a tuple's positional item schemas into the keyword 2020-12 reads
+/// them under.
+///
+/// Draft-07 says positional schemas with an array-valued `items` and bounds
+/// the rest with `additionalItems`; 2020-12 says `prefixItems` and lets
+/// `items` mean the rest. A single-schema `items` means the same thing in both
+/// and is left alone. Typed rather than a walk over the serialized document,
+/// so a config type whose own `default` or `enum` data happens to hold a key
+/// named `items` is never touched.
+#[derive(Debug, Clone)]
+struct TupleItemsRewrittenAsPrefixItems;
+
+impl Visitor for TupleItemsRewrittenAsPrefixItems {
+    fn visit_schema_object(&mut self, schema: &mut SchemaObject) {
+        visit_schema_object(self, schema);
+
+        let positional_item_schemas = match schema.array.as_deref_mut() {
+            Some(array) if matches!(array.items, Some(SingleOrVec::Vec(_))) => {
+                let Some(SingleOrVec::Vec(positional_item_schemas)) = array.items.take() else {
+                    return;
+                };
+                array.items = array.additional_items.take().map(SingleOrVec::Single);
+                positional_item_schemas
             }
-        }
-        Value::Array(items) => items.iter_mut().for_each(rewrite_definitions_references),
-        _ => {}
+            _ => return,
+        };
+
+        schema.extensions.insert(
+            "prefixItems".to_string(),
+            Value::Array(
+                positional_item_schemas
+                    .into_iter()
+                    .map(|item_schema| {
+                        serde_json::to_value(item_schema).expect("a schema always serializes")
+                    })
+                    .collect(),
+            ),
+        );
+    }
+}
+
+/// The single-schema `items` the visitor left untouched, for the tests below.
+#[cfg(test)]
+fn single_schema_items(schema: &SchemaObject) -> Option<&schemars::schema::Schema> {
+    match schema.array.as_deref()?.items.as_ref()? {
+        SingleOrVec::Single(item_schema) => Some(item_schema),
+        SingleOrVec::Vec(_) => None,
     }
 }
 
@@ -72,6 +116,7 @@ fn rewrite_definitions_references(node: &mut Value) {
 mod config_schema_document_tests {
     use super::*;
     use schemars::JsonSchema;
+    use schemars::schema::Schema;
     use serde::{Deserialize, Serialize};
 
     /// The shape a served document is checked against: doc comments become
@@ -87,6 +132,10 @@ mod config_schema_document_tests {
         /// How the frame maps onto the window.
         #[serde(default)]
         scaling: FixtureScaling,
+        /// Left, top, right, bottom.
+        crop: (u32, u32, u32, u32),
+        /// Every device to open.
+        device_ids: Vec<String>,
     }
 
     fn default_width() -> u32 {
@@ -133,11 +182,67 @@ mod config_schema_document_tests {
         let rendered = serde_json::to_string(&document).expect("the document serializes");
         assert!(
             !rendered.contains("#/definitions/"),
-            "no draft-07 reference may survive the rewrite: {rendered}"
+            "no draft-07 reference may survive: {rendered}"
         );
         assert!(
             rendered.contains("#/$defs/FixtureScaling"),
-            "the nested enum's reference must be repointed: {rendered}"
+            "the nested enum's reference must point into $defs: {rendered}"
+        );
+    }
+
+    /// Draft-07 spells a tuple's positional schemas as an array-valued
+    /// `items`, which 2020-12 reads as a schema for every element and refuses
+    /// as an array. A document labelled 2020-12 that carries the draft-07
+    /// spelling is one a validator reads wrong with nothing to say so.
+    #[test]
+    fn a_tuple_fields_positional_schemas_are_named_prefix_items() {
+        let document = FixtureSourceConfig::processor_config_schema_document();
+        let crop = &document["properties"]["crop"];
+        assert_eq!(crop["type"], "array");
+        assert_eq!(
+            crop["prefixItems"].as_array().map(Vec::len),
+            Some(4),
+            "a four-tuple carries four positional schemas: {crop}"
+        );
+        assert!(
+            crop.get("items").is_none(),
+            "an unbounded tail was never declared, so nothing bounds it: {crop}"
+        );
+        assert!(crop.get("additionalItems").is_none(), "{crop}");
+    }
+
+    /// The single-schema spelling means the same thing in both drafts, so a
+    /// plain sequence field must come through unchanged.
+    #[test]
+    fn a_sequence_fields_element_schema_is_left_as_items() {
+        let document = FixtureSourceConfig::processor_config_schema_document();
+        let device_ids = &document["properties"]["device_ids"];
+        assert_eq!(device_ids["type"], "array");
+        assert_eq!(device_ids["items"]["type"], "string");
+        assert!(device_ids.get("prefixItems").is_none(), "{device_ids}");
+    }
+
+    /// A tuple's draft-07 `additionalItems` is what 2020-12 calls `items`.
+    #[test]
+    fn a_bounded_tuple_tail_becomes_the_items_keyword() {
+        let mut schema = SchemaObject {
+            array: Some(Box::new(schemars::schema::ArrayValidation {
+                items: Some(SingleOrVec::Vec(vec![Schema::Bool(true)])),
+                additional_items: Some(Box::new(Schema::Bool(false))),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        TupleItemsRewrittenAsPrefixItems.visit_schema_object(&mut schema);
+
+        assert_eq!(
+            single_schema_items(&schema),
+            Some(&Schema::Bool(false)),
+            "the draft-07 tail schema becomes 2020-12's `items`"
+        );
+        assert_eq!(
+            schema.extensions.get("prefixItems"),
+            Some(&serde_json::json!([true]))
         );
     }
 
@@ -148,26 +253,17 @@ mod config_schema_document_tests {
     #[test]
     fn the_missing_derive_note_names_the_derive_and_the_re_export_path() {
         let source = include_str!("config_schema_document.rs");
-        let note = source
-            .lines()
-            .find(|line| line.contains("note = \"add `#[derive("))
+        let note_start = source
+            .find("note = \"add `#[derive(")
             .expect("the missing-derive note");
-        assert!(note.contains("streamlib::sdk::schemars::JsonSchema"));
-        assert!(note.contains("schemars(crate = "));
+        let note = &source[note_start..];
+        assert!(note.starts_with(
+            "note = \"add `#[derive(streamlib::sdk::schemars::JsonSchema)]` \
+             and `#[schemars(crate = "
+        ));
         assert!(
             source.contains("so the crate needs no new dependency"),
             "the note must say the crate adds no dependency"
         );
-    }
-
-    #[test]
-    fn a_reference_nested_inside_an_array_is_repointed_too() {
-        let mut document = serde_json::json!({
-            "definitions": { "Door": { "type": "string" } },
-            "anyOf": [{ "$ref": "#/definitions/Door" }, { "type": "null" }],
-        });
-        document = rewrite_draft_07_document_as_2020_12(document);
-        assert_eq!(document["anyOf"][0]["$ref"], "#/$defs/Door");
-        assert!(document["$defs"]["Door"].is_object());
     }
 }
