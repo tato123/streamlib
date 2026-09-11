@@ -709,3 +709,30 @@ def test_reconfiguring_a_processor_that_declares_no_config_refuses_the_keys():
     # the class declared.
     apply_configuration(built, {})
     assert built.configured_with is None
+
+
+def test_a_config_class_of_a_kind_the_deriver_cannot_read_is_accepted_and_open():
+    """A plain annotated class constructs fine and describes nothing.
+
+    Pinned rather than left to drift, because it is the one shape where the
+    catalog goes quiet on a class that works: an agent reading this entry learns
+    that configuration is a mapping and nothing about its keys. Whether such a
+    class should instead be refused at decoration, or read off its `__init__`,
+    is an open question for the owner — the plan says "any class constructible
+    from the config's keys with annotated fields" while the change enumerates
+    three kinds.
+    """
+
+    class PlainlyAnnotatedConfig:
+        def __init__(self, width: int = 3, label: str = "x") -> None:
+            self.width = width
+            self.label = label
+
+    @processor(execution="manual")
+    class PlainlyConfigured:
+        def __init__(self, config: PlainlyAnnotatedConfig) -> None:
+            self.config = config
+
+    assert PlainlyConfigured.__streamlib_processor_config_schema__ == {"type": "object"}
+    built = construct_processor_instance(PlainlyConfigured, {"width": 9}, None)
+    assert built.config.width == 9, "it constructs; only the description is missing"

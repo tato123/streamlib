@@ -150,11 +150,16 @@ from this renders anything new on a port.
   is constructed into the class's config class; the `processor` decorator's doc names the
   `config` rule; `stubtest` and pyright gate both as today.
 - **The six engine-tree fixtures migrate** to a config class in the change; the string
-  fixture in `test_live_graph_mutation.py` with them. The fourteen example processors and
-  the four extension-wheel processors lag as §Consumers states
+  fixture in `test_live_graph_mutation.py` with them. The fourteen example processors
+  ~~and the four extension-wheel processors~~ lag as §Consumers states
   (`docs/plan/ARCHITECTURE.md:327-436`: consumers are never in a migration's scope; a
   converted consumer's breakage is filed as tracked backlog at that consumer), with the
-  backlog issues filed at ship naming each file.
+  backlog issues filed at ship naming each file. — Amended 2026-09-11 by the owner's
+  ruling that the four extension-wheel processors migrate in the same PR as the engine
+  half (#2222), as the deliberate canary §Consumers reserves at `:430-433` for in-flight
+  work: `packages/` is the only consumer tree with a CI lane, so migrating it is what
+  proves the new construction path on real processors rather than on fixtures alone, and
+  it keeps that lane green. Only the fourteen example processors owe backlog at ship.
 
 ## ADDED: §Processor model — declaration registers
 

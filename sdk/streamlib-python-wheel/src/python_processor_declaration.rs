@@ -611,6 +611,52 @@ class AudioConsumer:
         assert_eq!(document["additionalProperties"], false);
     }
 
+    /// What `/api/registry` actually serializes for a Python class.
+    ///
+    /// The endpoint's own test registers a descriptor by hand, and the test
+    /// above stops at the descriptor, so without this nothing in a GPU-free CI
+    /// run carries a Python class's schema as far as the served shape — and the
+    /// end-to-end proof needs a running graph, which needs a GPU.
+    #[test]
+    fn the_served_rendering_of_a_python_class_carries_its_config_schema() {
+        let declaration = read_python_declaration(
+            "\
+import dataclasses
+
+
+@dataclasses.dataclass
+class AudioConsumerConfig:
+    gain: float
+    label: str = 'unlabelled'
+
+
+@processor(execution='manual')
+class AudioConsumer:
+    def __init__(self, config: AudioConsumerConfig) -> None:
+        self.config = config
+",
+        )
+        .expect("the declaration reads");
+
+        let served = serde_json::to_value(
+            streamlib::sdk::json_schema::ProcessorDescriptorOutput::from(&declaration.descriptor),
+        )
+        .expect("the rendering serializes");
+
+        assert_eq!(
+            served["config_schema"]["properties"]["gain"]["type"],
+            "number"
+        );
+        assert_eq!(
+            served["config_schema"]["properties"]["label"]["default"],
+            "unlabelled"
+        );
+        assert_eq!(
+            served["config_schema"]["required"],
+            serde_json::json!(["gain"])
+        );
+    }
+
     /// A processor declaring no config publishes what `EmptyConfig` publishes
     /// in Rust, so one catalog reads one way whichever language declared the
     /// processor.

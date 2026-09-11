@@ -3,11 +3,11 @@
 
 """What a running node tells an agent about a processor's config, end to end.
 
-The declaration suite proves the document is derived; this proves the derived
-document survives the trip into the Rust descriptor and out of `/api/registry`,
-on a real node with each processor in its own helper process. Nothing here needs
-a GPU, which is the point: every other live proof of a configured Python
-processor is rig-only.
+The declaration suite proves the document is derived, and the wheel's Rust tests
+prove it reaches the shape `/api/registry` serializes. This is the whole path on
+a real node with each processor in its own helper process — which needs a
+running graph, and a running graph initializes a GPU context, so it runs on the
+rig like every other live proof in this suite.
 """
 
 import json
@@ -18,6 +18,8 @@ from typing import Any, Iterator
 import pytest
 
 from app_under_test import start_app
+
+pytestmark = pytest.mark.requires_gpu
 
 APP = Path(__file__).parent / "processor_config_catalog_app.py"
 
