@@ -455,7 +455,10 @@ impl ProcessorInstanceFactory {
         let descriptors = self.descriptors.read();
         if !descriptors.contains_key(processor_class_import_path) {
             return Err(Error::ProcessorNotFound(format!(
-                "no descriptor is registered for processor type '{processor_class_import_path}',                  so there is nothing to install a constructor onto. A Python class registers its                  descriptor when its `@processor` decorator runs, so a path missing here names a                  class this process never imported."
+                "no descriptor is registered for processor type \
+                 '{processor_class_import_path}', so there is nothing to install a constructor \
+                 onto. A Python class registers its descriptor when its `@processor` decorator \
+                 runs, so a path missing here names a class this process never imported."
             )));
         }
 
@@ -612,6 +615,15 @@ impl ProcessorInstanceFactory {
             .read()
             .get(processor_type)
             .map(|descriptor| descriptor.processor_class_short_name.as_str().to_string())
+    }
+
+    /// Every processor class import path the registry holds a descriptor for.
+    ///
+    /// Projects the keys out under the read lock rather than going through
+    /// [`Self::list_registered`], which clones every descriptor whole — port
+    /// vectors and config schema included — for callers that want the names.
+    pub fn registered_processor_class_import_paths(&self) -> Vec<ProcessorClassImportPath> {
+        self.descriptors.read().keys().cloned().collect()
     }
 
     /// List all registered processor types with their full descriptors.
@@ -928,6 +940,10 @@ mod tests {
         assert!(
             message.contains(path),
             "the refusal must name the path nobody registered; got: {message}"
+        );
+        assert!(
+            !message.contains("  "),
+            "a source-wrapped message must carry no gutter into its text; got: {message}"
         );
         assert!(
             factory.descriptor(&class_import_path(path)).is_none(),

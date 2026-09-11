@@ -77,7 +77,7 @@ __all__ = [
     "log_event",
     "monotonic_now_ns",
     "open_test_harness_channel",
-    "processor_class_import_paths_registered_in_this_process",
+    "processor_class_import_paths_in_this_processes_catalog",
     "register_declared_processor_class",
     "runtime_log_directory",
 ]
@@ -1652,11 +1652,12 @@ def register_declared_processor_class(processor_class: type) -> None:
     interpreter could import, which `Runtime.add` refuses by name.
     """
 
-def processor_class_import_paths_registered_in_this_process() -> list[str]:
-    """Every processor class import path the calling process has registered.
+def processor_class_import_paths_in_this_processes_catalog() -> list[str]:
+    """Every processor class import path in the calling process's catalog.
 
-    The catalog `GET /api/registry` renders, readable in a process that serves
-    no control plane.
+    What `GET /api/registry` renders, readable in a process that serves no
+    control plane. A path appears here from the moment its `@processor`
+    decorator runs, whether or not anything has added it.
     """
 
 def monotonic_now_ns() -> int:

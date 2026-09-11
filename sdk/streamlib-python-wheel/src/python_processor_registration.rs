@@ -133,9 +133,21 @@ pub(crate) fn register_declared_processor_class(
     processor_class: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     if std::env::var_os(HELPER_PROCESS_ENTRYPOINT_ENVIRONMENT_VARIABLE).is_some() {
+        tracing::debug!(
+            "[register_declared_processor_class] a decoration inside a helper process registers \
+             nothing"
+        );
         return Ok(());
     }
-    if processor_class_import_path(processor_class).is_err() {
+    // Only an unresolvable identity is passed over, and deliberately narrowly:
+    // every other refusal `read_from_class` raises — a malformed port, an
+    // unreadable config schema — is the author's to see at decoration, so this
+    // guard asks the one question rather than swallowing the whole read.
+    if let Err(no_import_path) = processor_class_import_path(processor_class) {
+        tracing::debug!(
+            %no_import_path,
+            "[register_declared_processor_class] a class with no import path registers nothing"
+        );
         return Ok(());
     }
     let declaration = PythonProcessorDeclaration::read_from_class(processor_class)?;
@@ -144,17 +156,19 @@ pub(crate) fn register_declared_processor_class(
         .map_err(|registration_failure| PyValueError::new_err(registration_failure.to_string()))
 }
 
-/// Every processor class import path the calling process has registered.
+/// Every processor class import path in the calling process's catalog.
 ///
-/// The catalog `/api/registry` renders, reachable in a process that serves no
-/// control plane — which a helper is, and is the only way to see from inside
-/// one that decoration registered nothing there.
+/// What `/api/registry` renders, reachable in a process that serves no control
+/// plane — which a helper is, and is the only way to see from inside one that
+/// decoration registered nothing there. Named for the catalog rather than for
+/// registration: a path listed here may be one the engine's `is_registered`
+/// calls false, because that asks whether a constructor has arrived.
 #[pyfunction]
-pub(crate) fn processor_class_import_paths_registered_in_this_process() -> Vec<String> {
+pub(crate) fn processor_class_import_paths_in_this_processes_catalog() -> Vec<String> {
     PROCESSOR_REGISTRY
-        .list_registered()
+        .registered_processor_class_import_paths()
         .into_iter()
-        .map(|descriptor| descriptor.processor_class_import_path.as_str().to_string())
+        .map(|import_path| import_path.as_str().to_string())
         .collect()
 }
 

@@ -21,7 +21,7 @@ from helper_placement_processors import (
     ReportsUpstreamProcessSink,
 )
 from streamlib._engine import (
-    processor_class_import_paths_registered_in_this_process,
+    processor_class_import_paths_in_this_processes_catalog,
 )
 
 MARKER_PREFIX = "MARKER:"
@@ -166,7 +166,7 @@ def scenario_a_helper_registers_nothing_it_imports() -> None:
     """
     marker(
         f"APP_CATALOG_HAS_THE_CLASS="
-        f"{'helper_placement_processors:ReportsItsOwnProcessesProcessorCatalog' in processor_class_import_paths_registered_in_this_process()}"
+        f"{'helper_placement_processors:ReportsItsOwnProcessesProcessorCatalog' in processor_class_import_paths_in_this_processes_catalog()}"
     )
     runtime = streamlib.Runtime()
     runtime.add(ReportsItsOwnProcessesProcessorCatalog)

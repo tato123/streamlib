@@ -14,7 +14,7 @@ import os
 
 from streamlib import input, log, output, processor
 from streamlib._engine import (
-    processor_class_import_paths_registered_in_this_process,
+    processor_class_import_paths_in_this_processes_catalog,
 )
 
 
@@ -122,7 +122,7 @@ class ReportsItsOwnProcessesProcessorCatalog:
     def setup(self, ctx) -> None:
         declared_by_this_module = [
             path
-            for path in processor_class_import_paths_registered_in_this_process()
+            for path in processor_class_import_paths_in_this_processes_catalog()
             if path.startswith("helper_placement_processors:")
         ]
         log.info(

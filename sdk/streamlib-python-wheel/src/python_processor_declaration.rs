@@ -549,28 +549,13 @@ class BlurProcessor:
             .unwrap();
         sys_modules.set_item("streamlib", package).unwrap();
 
-        let stand_in_engine = python
-            .import("types")
-            .unwrap()
-            .call_method1("ModuleType", ("streamlib._engine",))
-            .unwrap();
-        let namespace = PyDict::new(python);
-        python
-            .run(
-                c"def register_declared_processor_class(processor_class): pass",
-                Some(&namespace),
-                None,
-            )
-            .unwrap();
-        stand_in_engine
-            .setattr(
-                "register_declared_processor_class",
-                namespace
-                    .get_item("register_declared_processor_class")
-                    .unwrap()
-                    .unwrap(),
-            )
-            .unwrap();
+        let stand_in_engine = PyModule::from_code(
+            python,
+            c"def register_declared_processor_class(processor_class): pass",
+            c"streamlib/_engine.py",
+            c"streamlib._engine",
+        )
+        .unwrap();
         sys_modules
             .set_item("streamlib._engine", stand_in_engine)
             .unwrap();

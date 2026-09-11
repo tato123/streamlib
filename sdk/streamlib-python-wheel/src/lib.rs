@@ -105,7 +105,7 @@ fn _engine(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module
     )?)?;
     module.add_function(wrap_pyfunction!(
-        python_processor_registration::processor_class_import_paths_registered_in_this_process,
+        python_processor_registration::processor_class_import_paths_in_this_processes_catalog,
         module
     )?)?;
     module.add_function(wrap_pyfunction!(python_logging::monotonic_now_ns, module)?)?;

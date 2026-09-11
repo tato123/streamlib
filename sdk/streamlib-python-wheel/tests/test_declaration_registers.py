@@ -19,7 +19,7 @@ import pytest
 
 from streamlib import processor
 from streamlib._engine import (
-    processor_class_import_paths_registered_in_this_process,
+    processor_class_import_paths_in_this_processes_catalog,
 )
 
 HELPER_PROCESS_ENTRYPOINT_ENV = "STREAMLIB_ENTRYPOINT"
@@ -74,7 +74,7 @@ def test_a_decorated_class_is_in_the_catalog_before_anything_adds_it():
     """The whole point: importing the module is the registration."""
     assert (
         "test_declaration_registers:DeclaredAndNeverAdded"
-        in processor_class_import_paths_registered_in_this_process()
+        in processor_class_import_paths_in_this_processes_catalog()
     )
 
 
@@ -87,7 +87,7 @@ def test_the_catalog_names_a_class_by_its_import_path():
     assert declared.__module__ == "a_module_declaring_one_processor"
     assert (
         "a_module_declaring_one_processor:RegisteredAtDecoration"
-        in processor_class_import_paths_registered_in_this_process()
+        in processor_class_import_paths_in_this_processes_catalog()
     )
 
 
@@ -98,7 +98,7 @@ def test_a_class_declared_inside_a_function_registers_nothing():
     fix named — moving that refusal to decoration would refuse at import what
     the plan refuses at add.
     """
-    catalog_before = set(processor_class_import_paths_registered_in_this_process())
+    catalog_before = set(processor_class_import_paths_in_this_processes_catalog())
 
     @processor(execution="manual")
     class DeclaredInsideThisTest:
@@ -106,7 +106,7 @@ def test_a_class_declared_inside_a_function_registers_nothing():
 
     assert "<locals>" in DeclaredInsideThisTest.__qualname__
     assert (
-        set(processor_class_import_paths_registered_in_this_process())
+        set(processor_class_import_paths_in_this_processes_catalog())
         == catalog_before
     )
 
@@ -153,7 +153,7 @@ def test_a_refused_second_decoration_leaves_the_first_registration_standing():
     with pytest.raises(ValueError):
         exec(source, module.__dict__)  # noqa: S102
 
-    registered = processor_class_import_paths_registered_in_this_process()
+    registered = processor_class_import_paths_in_this_processes_catalog()
     assert (
         registered.count("a_module_reloaded_once:SurvivesTheReload") == 1
     ), "a refused duplicate must neither displace the first nor register beside it"
@@ -190,7 +190,7 @@ def _catalog_of_an_interpreter_carrying(environment: "dict[str, str]") -> "list[
         f"import {PROCESSOR_MODULE_A_HELPER_HOSTS}\n"
         "import json\n"
         "from streamlib._engine import "
-        "processor_class_import_paths_registered_in_this_process as registered\n"
+        "processor_class_import_paths_in_this_processes_catalog as registered\n"
         "print(json.dumps(registered()))\n"
     )
     reported = subprocess.run(
