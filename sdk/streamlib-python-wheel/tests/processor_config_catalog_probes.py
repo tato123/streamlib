@@ -12,7 +12,7 @@ which is the half of the contract a served schema cannot show.
 
 import dataclasses
 import json
-from typing import Annotated, TypedDict
+from typing import Annotated, Optional, TypedDict
 
 import pydantic
 
@@ -33,6 +33,9 @@ class TypedDictProbeConfig(TypedDict, total=False):
 class DataclassProbeConfig:
     width: Annotated[int, "How wide the probe pretends its frames are."] = 640
     label: Annotated[str, "What to call this probe."] = "unlabelled"
+    # A null default has to survive the msgpack hop the document takes into
+    # Rust, which is the one value on this class that could be dropped there.
+    fallback: Annotated[Optional[str], "Where the probe falls back to."] = None
 
 
 class ModelProbeConfig(pydantic.BaseModel):

@@ -71,6 +71,18 @@ def test_a_dataclass_config_reaches_the_registry_with_types_defaults_and_descrip
     assert document["additionalProperties"] is False
 
 
+def test_a_null_default_survives_the_hop_into_the_descriptor(served_catalog):
+    """The document crosses into Rust through the msgpack value tree the data
+    plane uses, where `None` is the one value that could arrive as absent."""
+    fallback = schema_for(served_catalog, "DataclassConfiguredProbe")["properties"][
+        "fallback"
+    ]
+
+    assert fallback["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    assert "default" in fallback, f"the null default was dropped: {fallback}"
+    assert fallback["default"] is None
+
+
 def test_a_typed_dict_config_reaches_the_registry(served_catalog):
     document = schema_for(served_catalog, "TypedDictConfiguredProbe")
 
