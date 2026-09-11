@@ -36,7 +36,8 @@ fn registered_processor_classes() -> &'static Mutex<HashMap<ProcessorClassImport
     REGISTERED_PROCESSOR_CLASSES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Register `processor_class` if its import path is not already registered.
+/// Give the descriptor `processor_class` registered at decoration the
+/// constructor that spawns its helper process, unless it already has one.
 ///
 /// Returns the class import path `Runtime.add` names the processor by.
 pub(crate) fn register_processor_class(
