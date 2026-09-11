@@ -84,6 +84,10 @@ def test_process_receives_the_limited_context_without_gpu_full_access(
 def test_ctx_config_is_the_dict_the_processor_was_added_with(start_app_under_test):
     observation = run_probe(start_app_under_test, "configured_probe")
     assert observation["config"] == {"gain": 2.5, "label": "left"}
+    # The helper built the config class out of that mapping and handed the
+    # object to `__init__`; `ctx.config` above is still the mapping itself.
+    assert observation["constructed"] == {"gain": 2.5, "label": "left"}
+    assert observation["constructed_type"] == "ConfigProbeConfig"
 
 
 def test_ctx_config_is_an_empty_dict_when_nothing_was_passed(start_app_under_test):

@@ -13,6 +13,7 @@ travel as their names: the observation crosses a process boundary, so nothing
 in it can be a live object.
 """
 
+import dataclasses
 import json
 import os
 import threading
@@ -93,14 +94,27 @@ class ProcessContextProbe:
 # ---------------------------------------------------------------------------
 
 
+@dataclasses.dataclass
+class ConfigProbeConfig:
+    gain: float = 0.0
+    label: str = ""
+
+
 @processor(execution="manual")
 class ConfigProbe:
-    def __init__(self, gain: float = 0.0, label: str = "") -> None:
-        self.gain = gain
-        self.label = label
+    def __init__(self, config: ConfigProbeConfig) -> None:
+        self.config = config
 
     def setup(self, ctx: RuntimeContextFullAccess) -> None:
-        _report(lambda: {"config": ctx.config})
+        # Both halves of the contract from inside the helper: the object the
+        # helper constructed, and `ctx.config` still being the raw mapping.
+        _report(
+            lambda: {
+                "config": ctx.config,
+                "constructed": dataclasses.asdict(self.config),
+                "constructed_type": type(self.config).__name__,
+            }
+        )
 
 
 @processor(execution="manual")

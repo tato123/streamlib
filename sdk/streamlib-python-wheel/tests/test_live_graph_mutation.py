@@ -59,6 +59,8 @@ LIVE_ADDED_EFFECT_CLASS = "LiveAddedEffect"
 LIVE_ADDED_EFFECT_SOURCE = '''\
 """An effect that announces its frames, written after the node started."""
 
+import dataclasses
+
 from streamlib import (  # noqa: A004 — `input` is streamlib's port decorator
     ProcessorOutputTextureRing,
     RuntimeContextFullAccess,
@@ -71,12 +73,17 @@ from streamlib import (  # noqa: A004 — `input` is streamlib's port decorator
 )
 
 
+@dataclasses.dataclass
+class LiveAddedEffectConfig:
+    marker: str = "LIVE_FRAME"
+
+
 @processor
 class LiveAddedEffect:
     """Republishes each frame on a texture of its own and counts them."""
 
-    def __init__(self, marker: str = "LIVE_FRAME") -> None:
-        self.marker = marker
+    def __init__(self, config: LiveAddedEffectConfig) -> None:
+        self.marker = config.marker
         self.frames = 0
 
     @input(delivery_profile="newest")

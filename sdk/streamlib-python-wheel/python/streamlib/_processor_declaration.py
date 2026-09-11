@@ -18,7 +18,14 @@ A processor is named by its class's import path, derived from `__module__` and
 from __future__ import annotations
 
 import dataclasses
+import inspect
+import typing
 from typing import Any, Callable, Optional, TypeVar
+
+from ._processor_config_schema import (
+    derive_config_class_json_schema,
+    json_schema_for_a_processor_declaring_no_config,
+)
 
 
 __all__ = [
@@ -340,6 +347,14 @@ def processor(
     input port, and is required for one that declares none — a source has
     nothing to react to, so defaulting it there would produce a processor that
     silently never runs.
+
+    Configuration is one class, named by the annotation on the `config`
+    parameter of `__init__` — a TypedDict, a dataclass or a model. A class
+    whose `__init__` takes nothing beyond `self` declares no config and refuses
+    one. Any other signature is refused here, at decoration. The class's JSON
+    Schema is derived from its annotations and defaults and published in the
+    processor catalog, which is how an agent learns the keys before adding the
+    node.
     """
     if isinstance(processor_class, type):
         return _declare_processor(
@@ -381,8 +396,15 @@ def _declare_processor(
     description: str,
 ) -> ProcessorClass:
     input_ports, output_ports = _collect_declared_ports(processor_class)
+    config_class = _config_class_named_by_the_init_annotation(processor_class)
 
     processor_class.__streamlib_processor_declared__ = True  # type: ignore[attr-defined]
+    processor_class.__streamlib_processor_config_class__ = config_class  # type: ignore[attr-defined]
+    processor_class.__streamlib_processor_config_schema__ = (  # type: ignore[attr-defined]
+        json_schema_for_a_processor_declaring_no_config()
+        if config_class is None
+        else derive_config_class_json_schema(config_class)
+    )
     processor_class.__streamlib_processor_description__ = description  # type: ignore[attr-defined]
     processor_class.__streamlib_processor_execution__ = _resolve_execution(  # type: ignore[attr-defined]
         execution, interval_ms, processor_class, has_input_ports=bool(input_ports)
@@ -393,6 +415,96 @@ def _declare_processor(
     processor_class.__streamlib_processor_input_ports__ = input_ports  # type: ignore[attr-defined]
     processor_class.__streamlib_processor_output_ports__ = output_ports  # type: ignore[attr-defined]
     return processor_class
+
+
+def _config_class_named_by_the_init_annotation(
+    processor_class: type,
+) -> "Optional[type]":
+    """The config class `processor_class.__init__` names, or `None` for no config.
+
+    Every other signature is refused here rather than at the first `add`: the
+    decorator runs at import, which is the last moment an author is still
+    looking at the class.
+    """
+    # A class defining no `__init__` inherits `object`'s, whose signature is
+    # `(self, /, *args, **kwargs)` — a shape that would otherwise be refused.
+    if processor_class.__init__ is object.__init__:
+        return None
+
+    parameters = [
+        parameter
+        for name, parameter in inspect.signature(processor_class.__init__).parameters.items()
+        if name != "self"
+    ]
+    if not parameters:
+        return None
+
+    fix = (
+        f"declare one parameter named `config`, annotated with the class its settings "
+        f"live on — `def __init__(self, config: {processor_class.__name__}Config) -> "
+        f"None` — where that class is a TypedDict, a dataclass or a model. "
+        f"`rt.add(cls, config={{...}})` still passes a dict; the helper constructs the "
+        f"class from it and hands the object in."
+    )
+
+    if len(parameters) > 1:
+        raise TypeError(
+            f"{processor_class.__name__}.__init__ takes {len(parameters)} parameters "
+            f"besides `self` ({', '.join(parameter.name for parameter in parameters)}); "
+            f"a processor's config is one class, not a parameter list. To fix: {fix}"
+        )
+
+    parameter = parameters[0]
+    if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+        raise TypeError(
+            f"{processor_class.__name__}.__init__ takes `**{parameter.name}`; "
+            f"keyword-argument configuration is not how a processor is configured. "
+            f"To fix: {fix}"
+        )
+    if parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+        raise TypeError(
+            f"{processor_class.__name__}.__init__ takes `*{parameter.name}`; a "
+            f"processor's config is one object, not a variadic. To fix: {fix}"
+        )
+    if parameter.name != "config":
+        raise TypeError(
+            f"{processor_class.__name__}.__init__ takes `{parameter.name}`, but a "
+            f"processor's config parameter must be named `config`. To fix: {fix}"
+        )
+    if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
+        raise TypeError(
+            f"{processor_class.__name__}.__init__ takes `config` positionally only, but "
+            f"the helper constructs a processor as `cls(config=...)`. To fix: drop the "
+            f"`/` so `config` can be passed by name."
+        )
+
+    annotation = _resolved_init_annotations(processor_class).get("config")
+    if annotation is None:
+        raise TypeError(
+            f"{processor_class.__name__}.__init__ takes `config` with no annotation, so "
+            f"nothing names its config class and no schema can be derived. "
+            f"To fix: {fix}"
+        )
+    # The origin check, not the class check, is what refuses `dict[str, Any]` on
+    # Python 3.10, where `isinstance(dict[str, Any], type)` is still True.
+    if typing.get_origin(annotation) is not None or not isinstance(annotation, type):
+        raise TypeError(
+            f"{processor_class.__name__}.__init__ annotates `config` as {annotation!r}, "
+            f"which is not a class. A processor's config is one class the helper "
+            f"constructs. To fix: {fix}"
+        )
+    return annotation
+
+
+def _resolved_init_annotations(processor_class: type) -> "dict[str, Any]":
+    try:
+        return typing.get_type_hints(processor_class.__init__, include_extras=True)
+    except Exception as unresolvable:
+        raise TypeError(
+            f"{processor_class.__name__}.__init__ carries an annotation that cannot be "
+            f"resolved, so its config class cannot be read: {unresolvable}. The config "
+            f"class must be importable at run time, not only under `TYPE_CHECKING`."
+        ) from unresolvable
 
 
 def _collect_declared_ports(

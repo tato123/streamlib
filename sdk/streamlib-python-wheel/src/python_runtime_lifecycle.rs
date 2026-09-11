@@ -269,11 +269,12 @@ impl PythonRuntimeHandle {
 
     /// Add a processor class to the graph.
     ///
-    /// Takes the class, not an instance. `config` becomes the keyword arguments
-    /// the class is constructed with — which happens later, on the engine's
-    /// compile thread as `run()` brings the graph up, so a failing `__init__`
-    /// surfaces from `run()` rather than from here. Adding the same class twice
-    /// gives two processors, each with its own instance and configuration.
+    /// Takes the class, not an instance. `config` is the mapping the class's
+    /// config class is constructed from — which happens later, on the engine's
+    /// compile thread as `run()` brings the graph up, so a config the class
+    /// refuses surfaces from `run()` rather than from here. Adding the same
+    /// class twice gives two processors, each with its own instance and
+    /// configuration.
     #[pyo3(signature = (processor_class, *, config = None, display_name = None))]
     fn add(
         &self,

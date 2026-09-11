@@ -17,6 +17,7 @@ use streamlib::sdk::descriptors::{
 };
 use streamlib::sdk::execution::{ExecutionConfig, ProcessExecution, ThreadPriority};
 
+use crate::python_bag_conversion::python_object_to_json_value;
 use crate::python_processor_import_path::processor_class_import_path;
 
 /// Everything the engine needs to register and instantiate one Python
@@ -46,7 +47,8 @@ impl PythonProcessorDeclaration {
         .with_entrypoint(class_import_path)
         .with_scheduling(ProcessorScheduling {
             priority: read_thread_priority(processor_class)?,
-        });
+        })
+        .with_config_schema(read_config_schema_document(processor_class)?);
 
         descriptor.inputs = read_port_descriptors(processor_class, PortDirection::Input)?;
         descriptor.outputs = read_port_descriptors(processor_class, PortDirection::Output)?;
@@ -76,6 +78,29 @@ fn read_class_short_name(processor_class: &Bound<'_, PyAny>) -> PyResult<Process
     let short_name = processor_class.getattr("__name__")?.extract::<String>()?;
     ProcessorClassShortName::new(short_name)
         .map_err(|blank| PyValueError::new_err(blank.to_string()))
+}
+
+/// The JSON Schema the decorator derived from the class's config class.
+///
+/// Derived in Python, where the config class is, and carried across as the
+/// document the catalog serves — the engine never re-derives it and never
+/// inspects it.
+fn read_config_schema_document(
+    processor_class: &Bound<'_, PyAny>,
+) -> PyResult<serde_json::Value> {
+    let document = processor_class.getattr("__streamlib_processor_config_schema__")?;
+    let document = python_object_to_json_value(&document).map_err(|not_json| {
+        PyTypeError::new_err(format!(
+            "__streamlib_processor_config_schema__ must be a JSON Schema document: \
+             {not_json}"
+        ))
+    })?;
+    if !document.is_object() {
+        return Err(PyTypeError::new_err(format!(
+            "__streamlib_processor_config_schema__ must be a JSON object, got {document}"
+        )));
+    }
+    Ok(document)
 }
 
 fn read_execution_config(processor_class: &Bound<'_, PyAny>) -> PyResult<ExecutionConfig> {
@@ -417,6 +442,7 @@ class BlurProcessor:
     __streamlib_processor_description__ = 'blurs'
     __streamlib_processor_execution__ = {'mode': 'reactive'}
     __streamlib_processor_scheduling_priority__ = None
+    __streamlib_processor_config_schema__ = {'type': 'object'}
     __streamlib_processor_input_ports__ = []
     __streamlib_processor_output_ports__ = []
 ";
@@ -457,9 +483,19 @@ class BlurProcessor:
     const PROCESSOR_DECLARATION_MODULE_SOURCE: &str =
         include_str!("../python/streamlib/_processor_declaration.py");
 
+    /// The sibling the decorator module imports to derive a config schema.
+    const PROCESSOR_CONFIG_SCHEMA_MODULE_SOURCE: &str =
+        include_str!("../python/streamlib/_processor_config_schema.py");
+
     /// A namespace with the real decorator module already run in it.
+    ///
+    /// Marked as belonging to a stand-in `streamlib` package, because the
+    /// decorator module imports a sibling relatively and a bare run of its
+    /// source resolves that against nothing.
     fn declaration_module_namespace(python: Python<'_>) -> Bound<'_, PyDict> {
+        install_stand_in_streamlib_package(python);
         let namespace = PyDict::new(python);
+        namespace.set_item("__package__", "streamlib").unwrap();
         python
             .run(
                 &std::ffi::CString::new(PROCESSOR_DECLARATION_MODULE_SOURCE).unwrap(),
@@ -468,6 +504,51 @@ class BlurProcessor:
             )
             .expect("the decorator module runs");
         namespace
+    }
+
+    /// Put the decorator module's siblings on `sys.modules` under a package of
+    /// the right name, so its relative imports resolve without an installed
+    /// wheel.
+    fn install_stand_in_streamlib_package(python: Python<'_>) {
+        let sys_modules = python
+            .import("sys")
+            .unwrap()
+            .getattr("modules")
+            .unwrap()
+            .cast_into::<PyDict>()
+            .unwrap();
+        if sys_modules
+            .contains("streamlib._processor_config_schema")
+            .unwrap()
+        {
+            return;
+        }
+
+        let types_module = python.import("types").unwrap();
+        let package = types_module
+            .call_method1("ModuleType", ("streamlib",))
+            .unwrap();
+        package.setattr("__path__", PyList::empty(python)).unwrap();
+        sys_modules.set_item("streamlib", package).unwrap();
+
+        let sibling = types_module
+            .call_method1("ModuleType", ("streamlib._processor_config_schema",))
+            .unwrap();
+        let sibling_namespace = sibling
+            .getattr("__dict__")
+            .unwrap()
+            .cast_into::<PyDict>()
+            .unwrap();
+        python
+            .run(
+                &std::ffi::CString::new(PROCESSOR_CONFIG_SCHEMA_MODULE_SOURCE).unwrap(),
+                Some(&sibling_namespace),
+                None,
+            )
+            .expect("the config schema module runs");
+        sys_modules
+            .set_item("streamlib._processor_config_schema", sibling)
+            .unwrap();
     }
 
     /// Run the real decorator module, run `class_body_source` against it, and
@@ -500,6 +581,67 @@ class BlurProcessor:
             .expect("the declaration reads")
             .descriptor
             .inputs
+    }
+
+    /// The catalog's whole point: an agent reads a processor's keys off the
+    /// descriptor before the class is ever in a graph, so the document the
+    /// decorator derived has to survive the trip into Rust intact.
+    #[test]
+    fn the_descriptor_carries_the_config_classs_derived_schema() {
+        let declaration = read_python_declaration(
+            "\
+import dataclasses
+
+
+@dataclasses.dataclass
+class AudioConsumerConfig:
+    gain: float
+    label: str = 'unlabelled'
+
+
+@processor(execution='manual')
+class AudioConsumer:
+    def __init__(self, config: AudioConsumerConfig) -> None:
+        self.config = config
+",
+        )
+        .expect("the declaration reads");
+
+        let document = declaration
+            .descriptor
+            .config_schema
+            .expect("a declared Python class always carries a config schema");
+        assert_eq!(document["type"], "object");
+        assert_eq!(document["properties"]["gain"]["type"], "number");
+        assert_eq!(document["properties"]["label"]["type"], "string");
+        assert_eq!(document["properties"]["label"]["default"], "unlabelled");
+        assert_eq!(document["required"], serde_json::json!(["gain"]));
+        assert_eq!(document["additionalProperties"], false);
+    }
+
+    /// A processor declaring no config publishes what `EmptyConfig` publishes
+    /// in Rust, so one catalog reads one way whichever language declared the
+    /// processor.
+    #[test]
+    fn a_class_declaring_no_config_carries_the_same_document_rust_publishes() {
+        let declaration = read_python_declaration(
+            "\
+@processor(execution='manual')
+class AudioConsumer:
+    def __init__(self) -> None:
+        self.frames = 0
+",
+        )
+        .expect("the declaration reads");
+
+        assert_eq!(
+            declaration.descriptor.config_schema,
+            Some(serde_json::json!({
+                "type": "object",
+                "description": "This processor declares no configuration.",
+                "additionalProperties": false,
+            }))
+        );
     }
 
     /// The message a refused Python declaration hands a user.
@@ -645,6 +787,7 @@ class AudioConsumer:
     __streamlib_processor_description__ = ''
     __streamlib_processor_execution__ = {{'mode': 'reactive'}}
     __streamlib_processor_scheduling_priority__ = None
+    __streamlib_processor_config_schema__ = {{'type': 'object'}}
     __streamlib_processor_input_ports__ = [{{
         'name': 'audio',
         'description': '',
@@ -843,6 +986,7 @@ class AudioConsumer:
     __streamlib_processor_description__ = ''
     __streamlib_processor_execution__ = {'mode': 'manual'}
     __streamlib_processor_scheduling_priority__ = None
+    __streamlib_processor_config_schema__ = {'type': 'object'}
     __streamlib_processor_input_ports__ = []
     __streamlib_processor_output_ports__ = [{
         'name': 'windows',
