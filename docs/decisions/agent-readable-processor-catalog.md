@@ -58,9 +58,14 @@ the other way, code to document, and attaches to nothing on a link.
   processor adds no dependency; three local config enums gain the derive.
 - The descriptor carries a schema document where it carried a type-name string.
 - Every Python processor that took keyword configuration changes shape: the engine-tree
-  fixtures migrate with the change; example and extension-wheel processors lag as
-  consumers do, and the extension wheels' required parameters become required keys in a
-  config class rather than defaults.
+  fixtures migrate with the change, and the extension wheels' required parameters become
+  required keys in a config class rather than defaults. ~~Example and extension-wheel
+  processors lag as consumers do~~ — amended 2026-09-11 by the owner's ruling that the
+  four extension-wheel processors migrate in the same PR as the engine half, as the
+  deliberate canary §Consumers reserves for in-flight work: `packages/` is the only
+  consumer tree with a CI lane, so migrating it is what proves the new construction path
+  on real processors and keeps that lane green. The fourteen example processors lag as
+  consumers do, unchanged.
 - Reconfiguration takes the config object; `configure(self, **config)` goes with the
   keyword form.
 - A helper process importing a decorated class must register nothing, so the wheel has
