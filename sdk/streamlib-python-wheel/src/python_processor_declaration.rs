@@ -85,9 +85,7 @@ fn read_class_short_name(processor_class: &Bound<'_, PyAny>) -> PyResult<Process
 /// Derived in Python, where the config class is, and carried across as the
 /// document the catalog serves — the engine never re-derives it and never
 /// inspects it.
-fn read_config_schema_document(
-    processor_class: &Bound<'_, PyAny>,
-) -> PyResult<serde_json::Value> {
+fn read_config_schema_document(processor_class: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     let document = processor_class.getattr("__streamlib_processor_config_schema__")?;
     let document = python_object_to_json_value(&document).map_err(|not_json| {
         PyTypeError::new_err(format!(
