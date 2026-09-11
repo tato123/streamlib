@@ -17,7 +17,9 @@ use streamlib::sdk::descriptors::{
 };
 use streamlib::sdk::execution::{ExecutionConfig, ProcessExecution, ThreadPriority};
 
-use crate::python_bag_conversion::python_object_to_json_value;
+use crate::python_bag_conversion::{
+    python_object_to_json_value, python_type_name_for_error_message,
+};
 use crate::python_processor_import_path::processor_class_import_path;
 
 /// Everything the engine needs to register and instantiate one Python
@@ -86,19 +88,19 @@ fn read_class_short_name(processor_class: &Bound<'_, PyAny>) -> PyResult<Process
 /// document the catalog serves — the engine never re-derives it and never
 /// inspects it.
 fn read_config_schema_document(processor_class: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
-    let document = processor_class.getattr("__streamlib_processor_config_schema__")?;
-    let document = python_object_to_json_value(&document).map_err(|not_json| {
+    let stamped = processor_class.getattr("__streamlib_processor_config_schema__")?;
+    // Refused here rather than by the converter, whose own messages are
+    // written for a bag on the data plane and would tell a processor author
+    // about GPU frames.
+    let document = stamped.clone().cast_into::<PyDict>().map_err(|_| {
         PyTypeError::new_err(format!(
-            "__streamlib_processor_config_schema__ must be a JSON Schema document: \
-             {not_json}"
+            "__streamlib_processor_config_schema__ must be a JSON object, got a {} — the \
+             decorator derives this document, so a class reaching here was built by hand \
+             rather than by @streamlib.processor",
+            python_type_name_for_error_message(&stamped, "value of unknown type")
         ))
     })?;
-    if !document.is_object() {
-        return Err(PyTypeError::new_err(format!(
-            "__streamlib_processor_config_schema__ must be a JSON object, got {document}"
-        )));
-    }
-    Ok(document)
+    python_object_to_json_value(document.as_any())
 }
 
 fn read_execution_config(processor_class: &Bound<'_, PyAny>) -> PyResult<ExecutionConfig> {
@@ -430,6 +432,7 @@ mod tests {
     use super::*;
     use crate::python_class_from_source_for_tests::class_from_source;
     use streamlib::sdk::descriptors::ProcessorConfigJsonSchema;
+    use streamlib::sdk::processors::EmptyConfig;
 
     /// A class carrying what `@streamlib.processor` attaches.
     const DECLARED_CLASS_SOURCE: &str = "\
@@ -482,10 +485,6 @@ class BlurProcessor:
     const PROCESSOR_DECLARATION_MODULE_SOURCE: &str =
         include_str!("../python/streamlib/_processor_declaration.py");
 
-    /// The sibling the decorator module imports to derive a config schema.
-    const PROCESSOR_CONFIG_SCHEMA_MODULE_SOURCE: &str =
-        include_str!("../python/streamlib/_processor_config_schema.py");
-
     /// A namespace with the real decorator module already run in it.
     ///
     /// Marked as belonging to a stand-in `streamlib` package, because the
@@ -505,9 +504,19 @@ class BlurProcessor:
         namespace
     }
 
-    /// Put the decorator module's siblings on `sys.modules` under a package of
-    /// the right name, so its relative imports resolve without an installed
-    /// wheel.
+    /// The wheel's own Python directory, where the decorator module's siblings
+    /// live.
+    const WHEEL_PYTHON_PACKAGE_DIRECTORY: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/python/streamlib");
+
+    /// Put a `streamlib` package on `sys.modules` whose search path is the real
+    /// source directory, so the decorator module's relative imports resolve
+    /// without an installed wheel.
+    ///
+    /// A package object already on `sys.modules` is never initialised again, so
+    /// `__init__.py` — which imports the compiled `_engine` a `cargo test` run
+    /// does not have — is not executed. Only the siblings actually imported are
+    /// loaded, and each is the same file `include_str!` above reads.
     fn install_stand_in_streamlib_package(python: Python<'_>) {
         let sys_modules = python
             .import("sys")
@@ -516,38 +525,22 @@ class BlurProcessor:
             .unwrap()
             .cast_into::<PyDict>()
             .unwrap();
-        if sys_modules
-            .contains("streamlib._processor_config_schema")
-            .unwrap()
-        {
+        if sys_modules.contains("streamlib").unwrap() {
             return;
         }
 
-        let types_module = python.import("types").unwrap();
-        let package = types_module
+        let package = python
+            .import("types")
+            .unwrap()
             .call_method1("ModuleType", ("streamlib",))
             .unwrap();
-        package.setattr("__path__", PyList::empty(python)).unwrap();
-        sys_modules.set_item("streamlib", package).unwrap();
-
-        let sibling = types_module
-            .call_method1("ModuleType", ("streamlib._processor_config_schema",))
-            .unwrap();
-        let sibling_namespace = sibling
-            .getattr("__dict__")
-            .unwrap()
-            .cast_into::<PyDict>()
-            .unwrap();
-        python
-            .run(
-                &std::ffi::CString::new(PROCESSOR_CONFIG_SCHEMA_MODULE_SOURCE).unwrap(),
-                Some(&sibling_namespace),
-                None,
+        package
+            .setattr(
+                "__path__",
+                PyList::new(python, [WHEEL_PYTHON_PACKAGE_DIRECTORY]).unwrap(),
             )
-            .expect("the config schema module runs");
-        sys_modules
-            .set_item("streamlib._processor_config_schema", sibling)
             .unwrap();
+        sys_modules.set_item("streamlib", package).unwrap();
     }
 
     /// Run the real decorator module, run `class_body_source` against it, and
@@ -622,15 +615,8 @@ class AudioConsumer:
     /// in Rust, so one catalog reads one way whichever language declared the
     /// processor.
     ///
-    /// Compared against the Rust document itself rather than a literal: a
-    /// literal proves the Python half against this test's own opinion, and the
-    /// invariant being claimed is that the two emitters agree.
-    ///
-    /// One key is deliberately excluded. `schemars` stamps every root document
-    /// with a `title` from the config type's name, so a Rust document carries
-    /// `"title": "EmptyConfig"` and no Python document carries a title at all.
-    /// The keyword is an annotation with no validation effect, and converting
-    /// either side to match would be churn on a difference no reader acts on.
+    /// `schemars` stamps a root `title` from the config type's name and no
+    /// Python document carries one, so the comparison drops it.
     #[test]
     fn a_class_declaring_no_config_carries_the_same_document_rust_publishes() {
         let declaration = read_python_declaration(
@@ -643,9 +629,7 @@ class AudioConsumer:
         )
         .expect("the declaration reads");
 
-        let mut what_rust_publishes =
-            <streamlib::sdk::processors::EmptyConfig as ProcessorConfigJsonSchema>::
-                processor_config_schema_document();
+        let mut what_rust_publishes = EmptyConfig::processor_config_schema_document();
         what_rust_publishes
             .as_object_mut()
             .expect("the document is an object")
