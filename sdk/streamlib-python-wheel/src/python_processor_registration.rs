@@ -3,9 +3,12 @@
 
 //! Making a Python class a processor type the engine can instantiate.
 //!
+//! Registration arrives in two halves. `@processor` registers the descriptor
+//! when it runs, so the class is in the catalog an agent reads before anything
+//! adds it; the first add installs the constructor onto that descriptor.
 //! Registration is per process and idempotent per identity: `rt.add(Blur)`
-//! called twice registers `Blur` once and adds two processors to the graph,
-//! each with its own configuration and its own instance of the class.
+//! called twice installs `Blur`'s constructor once and adds two processors to
+//! the graph, each with its own configuration and its own instance of the class.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -15,8 +18,11 @@ use pyo3::prelude::*;
 use streamlib::sdk::descriptors::ProcessorClassImportPath;
 use streamlib::sdk::processors::PROCESSOR_REGISTRY;
 
-use crate::python_helper_process_spawn_host::spawn_host_for_processor_node;
+use crate::python_helper_process_spawn_host::{
+    HELPER_PROCESS_ENTRYPOINT_ENVIRONMENT_VARIABLE, spawn_host_for_processor_node,
+};
 use crate::python_processor_declaration::PythonProcessorDeclaration;
+use crate::python_processor_import_path::processor_class_import_path;
 
 /// Which Python class each registered import path was registered from.
 ///
@@ -72,7 +78,6 @@ pub(crate) fn register_processor_class(
         };
     }
 
-    let descriptor = declaration.descriptor.clone();
     let held_processor_class = processor_class.clone().unbind();
 
     // The closure captures the class's import path, never the class object:
@@ -89,8 +94,8 @@ pub(crate) fn register_processor_class(
     let descriptor_for_constructor = declaration.descriptor.clone();
 
     PROCESSOR_REGISTRY
-        .register_dynamic(
-            descriptor,
+        .install_constructor_for_registered_descriptor(
+            &identity,
             Box::new(move |node| {
                 spawn_host_for_processor_node(
                     &processor_class_import_path,
@@ -104,10 +109,50 @@ pub(crate) fn register_processor_class(
                 })
             }),
         )
-        .map_err(|registration_failure| PyValueError::new_err(registration_failure.to_string()))?;
+        .map_err(|install_failure| PyValueError::new_err(install_failure.to_string()))?;
 
     registered.insert(identity.clone(), held_processor_class);
     Ok(identity)
+}
+
+/// Register the descriptor `@processor` has just stamped onto
+/// `processor_class`, so the class is in the catalog before anything adds it.
+///
+/// The decorator's one call into the native half. Registers the descriptor
+/// alone: the constructor is the first add's to supply, through
+/// [`register_processor_class`].
+///
+/// Two classes are passed over rather than registered. One decorated inside a
+/// helper process registers nothing, because a helper hosts no graph. One no
+/// interpreter could import — declared in the entry file or inside a function
+/// — has no identity to be registered under, and `rt.add` is where that is
+/// said, with the fix named.
+#[pyfunction]
+pub(crate) fn register_declared_processor_class(processor_class: &Bound<'_, PyAny>) -> PyResult<()> {
+    if std::env::var_os(HELPER_PROCESS_ENTRYPOINT_ENVIRONMENT_VARIABLE).is_some() {
+        return Ok(());
+    }
+    if processor_class_import_path(processor_class).is_err() {
+        return Ok(());
+    }
+    let declaration = PythonProcessorDeclaration::read_from_class(processor_class)?;
+    PROCESSOR_REGISTRY
+        .register_descriptor_only(declaration.descriptor)
+        .map_err(|registration_failure| PyValueError::new_err(registration_failure.to_string()))
+}
+
+/// Every processor class import path the calling process has registered.
+///
+/// The catalog `/api/registry` renders, reachable in a process that serves no
+/// control plane — which a helper is, and is the only way to see from inside
+/// one that decoration registered nothing there.
+#[pyfunction]
+pub(crate) fn processor_class_import_paths_registered_in_this_process() -> Vec<String> {
+    PROCESSOR_REGISTRY
+        .list_registered()
+        .into_iter()
+        .map(|descriptor| descriptor.processor_class_import_path.as_str().to_string())
+        .collect()
 }
 
 /// Register the class `processor_class_import_path` names by importing it into

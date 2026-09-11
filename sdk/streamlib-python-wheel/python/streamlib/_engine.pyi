@@ -1640,6 +1640,23 @@ def capability_extension_host_for_the_helper_process(
 ) -> CapabilityExtensionHost:
     """Mint the host `distribution`'s hook is handed in a helper process."""
 
+def register_declared_processor_class(processor_class: type) -> None:
+    """Register the descriptor `@processor` has just stamped onto a class.
+
+    Called by the decorator and nowhere else, so the class is in the processor
+    catalog from the moment its module is imported; the constructor arrives at
+    the first `Runtime.add`. A class decorated inside a helper process
+    registers nothing — a helper hosts no graph — and so does one no
+    interpreter could import, which `Runtime.add` refuses by name.
+    """
+
+def processor_class_import_paths_registered_in_this_process() -> list[str]:
+    """Every processor class import path the calling process has registered.
+
+    The catalog `GET /api/registry` renders, readable in a process that serves
+    no control plane.
+    """
+
 def monotonic_now_ns() -> int:
     """Current monotonic time in nanoseconds via `clock_gettime(CLOCK_MONOTONIC)`."""
 
