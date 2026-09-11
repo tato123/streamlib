@@ -1,7 +1,7 @@
 # Copyright (c) 2025 Jonathan Fontanez
 # SPDX-License-Identifier: BUSL-1.1
 
-"""Three processors, three kinds of config class, for one catalog read.
+"""Four processors — three kinds of config class and one declaring none.
 
 Their own module, not the test module, because each runs in a helper process
 that reaches its class by importing the module it was declared in.

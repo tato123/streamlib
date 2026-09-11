@@ -622,12 +622,14 @@ class AudioConsumer:
         let declaration = read_python_declaration(
             "\
 import dataclasses
+import typing
 
 
 @dataclasses.dataclass
 class AudioConsumerConfig:
     gain: float
     label: str = 'unlabelled'
+    fallback: typing.Optional[str] = None
 
 
 @processor(execution='manual')
@@ -655,6 +657,16 @@ class AudioConsumer:
             served["config_schema"]["required"],
             serde_json::json!(["gain"])
         );
+
+        // The null leg of the hop the document takes into Rust: a dropped key
+        // would read as "no default" rather than as the default the author
+        // wrote, and nothing else in a GPU-free run crosses a nil.
+        let fallback = &served["config_schema"]["properties"]["fallback"];
+        assert!(
+            fallback.get("default").is_some(),
+            "the null default was dropped: {fallback}"
+        );
+        assert_eq!(fallback["default"], serde_json::Value::Null);
     }
 
     /// A processor declaring no config publishes what `EmptyConfig` publishes
