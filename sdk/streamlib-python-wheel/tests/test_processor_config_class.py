@@ -389,3 +389,81 @@ def test_a_processor_without_configure_is_refused_by_the_hook_it_needs():
 def test_a_configuration_that_is_not_a_mapping_is_refused_before_construction():
     with pytest.raises(TypeError, match="must be a dict"):
         construct_processor_instance(DataclassConfigured, ["width", 4], None)
+
+
+def test_a_typing_extensions_typed_dict_is_recognised_as_one():
+    """`typing.is_typeddict` sees `typing.TypedDict` alone.
+
+    On the 3.10 floor `Required` / `NotRequired` come from `typing_extensions`,
+    so its spelling is the one an author reaches for — and unrecognised it
+    would fall through to an open object with no keys and no refusal to say so.
+    """
+    typing_extensions = pytest.importorskip("typing_extensions")
+
+    class ExtensionSpelledConfig(typing_extensions.TypedDict):
+        width: int
+
+    document = schema_of(ExtensionSpelledConfig)
+
+    assert document["properties"]["width"] == {"type": "integer"}
+    assert document["required"] == ["width"]
+
+
+def test_a_config_annotated_as_any_is_refused_the_same_on_every_version():
+    """`isinstance(typing.Any, type)` is False on 3.10 and True on 3.11+, so
+    without naming `Any` the rule would differ across the wheel's own range."""
+    with pytest.raises(TypeError, match="`Any`"):
+
+        @processor(execution="manual")
+        class Blur:
+            def __init__(self, config: Any) -> None:
+                self.config = config
+
+
+# ---------------------------------------------------------------------------
+# The migrated fixtures, guarded where CI can see them
+# ---------------------------------------------------------------------------
+
+# Every other test that runs these five is `requires_gpu` and so runs on the rig
+# alone. Decoration is where a bad migration raises, so importing them here is
+# what puts the migration in front of CI at all.
+MIGRATED_FIXTURES = [
+    ("capability_context_probes", "ConfigProbe", "ConfigProbeConfig"),
+    ("helper_placement_processors", "ReportsItsOwnProcessSource", "ReportsItsOwnProcessSourceConfig"),
+    ("helper_process_probes", "PassThroughProbe", "PassThroughProbeConfig"),
+    ("single_processor_under_test", "ConfiguredScaler", "ConfiguredScalerConfig"),
+    ("texture_ring_producer_probes", "TextureRingPublishingVideoSource", "TextureRingPublishingVideoSourceConfig"),
+]
+
+
+@pytest.mark.parametrize(
+    ("module_name", "processor_name", "config_name"),
+    MIGRATED_FIXTURES,
+    ids=[processor_name for _, processor_name, _ in MIGRATED_FIXTURES],
+)
+def test_a_migrated_fixture_declares_the_config_class_beside_it(
+    module_name, processor_name, config_name
+):
+    module = __import__(module_name)
+    processor_class = getattr(module, processor_name)
+
+    assert processor_class.__streamlib_processor_config_class__ is getattr(
+        module, config_name
+    )
+
+
+def test_the_live_mutation_fixture_written_as_a_source_string_still_declares():
+    """`LiveAddedEffect` lives as a triple-quoted literal, so no import, no
+    linter and no AST sweep reaches it — running it here is the only way a bad
+    migration of it fails anywhere but on the rig."""
+    from test_live_graph_mutation import LIVE_ADDED_EFFECT_SOURCE
+
+    namespace: "dict[str, Any]" = {"__name__": "processors.live_added_effect"}
+    exec(compile(LIVE_ADDED_EFFECT_SOURCE, "live_added_effect.py", "exec"), namespace)
+
+    effect = namespace["LiveAddedEffect"]
+    assert effect.__streamlib_processor_config_class__ is namespace["LiveAddedEffectConfig"]
+    assert effect.__streamlib_processor_config_schema__["properties"]["marker"] == {
+        "type": "string",
+        "default": "LIVE_FRAME",
+    }

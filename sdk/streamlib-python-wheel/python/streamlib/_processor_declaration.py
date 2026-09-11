@@ -485,6 +485,12 @@ def _config_class_named_by_the_init_annotation(
             f"nothing names its config class and no schema can be derived. "
             f"To fix: {fix}"
         )
+    if annotation is Any:
+        raise TypeError(
+            f"{processor_class.__name__}.__init__ annotates `config` as `Any`, which "
+            f"names no class, so the helper has nothing to construct and no schema can "
+            f"be derived. To fix: {fix}"
+        )
     # The origin check, not the class check, is what refuses `dict[str, Any]` on
     # Python 3.10, where `isinstance(dict[str, Any], type)` is still True.
     if typing.get_origin(annotation) is not None or not isinstance(annotation, type):

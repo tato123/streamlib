@@ -198,11 +198,16 @@ process boundary).
   least one input port defaults; one declaring none must say what it is. A source has nothing to
   react to, so the default would hand the author a processor that silently never runs — the one
   case where the convenient default is a trap.
-- **Configuration is constructor keyword arguments.** `rt.add(Blur, config={"radius": 3})`
-  constructs `Blur(radius=3)`, so a processor's settings are ordinary Python parameters with
-  ordinary defaults and there is no configuration object to learn. It travels as JSON on the graph
-  node rather than captured in a closure, because one class added twice must yield two
-  independently configured instances — and because that keeps it visible in `graph`.
+> ~~**Configuration is constructor keyword arguments.** `rt.add(Blur, config={"radius": 3})`
+> constructs `Blur(radius=3)`, so a processor's settings are ordinary Python parameters with
+> ordinary defaults and there is no configuration object to learn.~~ — Superseded 2026-09-11 by
+> `agent-readable-processor-catalog.md`: a processor's config is one class, named by the
+> annotation on its `__init__`'s `config` parameter, and the helper constructs that class from
+> the mapping. Nothing recorded a keyword signature anywhere, so an agent could only learn a key
+> by adding the node and reading the failure; a class has annotations and defaults a schema is
+> derived from. The rest of the bullet stands: configuration travels as JSON on the graph node
+> rather than captured in a closure, because one class added twice must yield two independently
+> configured instances — and because that keeps it visible in `graph`.
 - **Python ports declare no schema.** The wire is self-describing and consuming is a cast at read
   time, so a port carries a name, a description and (on inputs) a delivery profile. Adding a
   schema hint here would build on the per-read matching being deleted.

@@ -55,6 +55,22 @@ _MAPPING_ORIGINS = (
 )
 
 
+def is_a_typed_dict(candidate: Any) -> bool:
+    """Whether `candidate` is a TypedDict under either spelling.
+
+    `typing.is_typeddict` recognises `typing.TypedDict` alone, and a
+    `typing_extensions.TypedDict` subclass — what an author on the 3.10 floor
+    reaches for, and what `Required` / `NotRequired` need there — is invisible
+    to it. The pair of key sets is the structural signature of one; nothing
+    else carries both.
+    """
+    return typing.is_typeddict(candidate) or (
+        isinstance(candidate, type)
+        and hasattr(candidate, "__required_keys__")
+        and hasattr(candidate, "__optional_keys__")
+    )
+
+
 def json_schema_for_a_processor_declaring_no_config() -> "dict[str, Any]":
     """The document a processor that takes no configuration publishes.
 
@@ -73,7 +89,7 @@ def derive_config_class_json_schema(config_class: type) -> "dict[str, Any]":
     model_json_schema = getattr(config_class, "model_json_schema", None)
     if callable(model_json_schema):
         return _document_the_model_carries(config_class, model_json_schema)
-    if typing.is_typeddict(config_class):
+    if is_a_typed_dict(config_class):
         return _typed_dict_document(config_class)
     if dataclasses.is_dataclass(config_class):
         return _dataclass_document(config_class)
@@ -213,7 +229,7 @@ def _json_schema_for_annotation(annotation: Any) -> "dict[str, Any]":
         if issubclass(annotation, enum.Enum):
             return _enumerated_schema(tuple(member.value for member in annotation))
         if (
-            typing.is_typeddict(annotation)
+            is_a_typed_dict(annotation)
             or dataclasses.is_dataclass(annotation)
             or callable(getattr(annotation, "model_json_schema", None))
         ):

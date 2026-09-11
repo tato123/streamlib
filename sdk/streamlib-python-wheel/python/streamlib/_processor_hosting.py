@@ -48,7 +48,7 @@ def apply_configuration(processor_instance: Any, configuration: Optional[Any]) -
     if reconfigure is None:
         raise TypeError(
             f"{processor_class.__name__} cannot be reconfigured while running: "
-            f"define `configure(self, config)` on it to accept updates."
+            f"define `configure(self, config)` on it to take one."
         )
     config_class = getattr(processor_class, "__streamlib_processor_config_class__", None)
     configuration = _as_configuration_mapping(processor_class, configuration)
