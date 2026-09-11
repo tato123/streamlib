@@ -10,16 +10,23 @@ suite inside the child.
 """
 
 import time
+from typing import TypedDict
 
 from streamlib import input, output, processor
+
+
+class PassThroughProbeConfig(TypedDict, total=False):
+    """A TypedDict config, so a real helper run covers that kind too."""
+
+    tag: str
 
 
 @processor
 class PassThroughProbe:
     """Copies every bag from its input to its output."""
 
-    def __init__(self, tag: str = "untagged") -> None:
-        self.tag = tag
+    def __init__(self, config: PassThroughProbeConfig) -> None:
+        self.tag = config.get("tag", "untagged")
 
     @input(delivery_profile="newest")
     def frames_from_upstream(self) -> None: ...

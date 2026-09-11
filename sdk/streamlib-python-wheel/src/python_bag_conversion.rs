@@ -263,8 +263,8 @@ pub(crate) fn python_type_name_for_error_message(
     )
 }
 
-/// Convert a processor's JSON configuration into the keyword arguments its
-/// class is constructed with.
+/// Convert a processor's JSON configuration into the mapping its config class
+/// is constructed from.
 ///
 /// Routed through the same msgpack value tree the data plane uses rather than
 /// growing a second converter: the engine stores configuration as JSON, and one

@@ -12,9 +12,10 @@ wheel's own Rust directly — the engine is never on the data path.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 from collections.abc import Mapping
-from typing import Any, Literal, Protocol
+from typing import Annotated, Any, Literal, Protocol
 
 from streamlib import (
     EncodedAudioPacket,
@@ -211,6 +212,16 @@ def _optional_bearer_token(bearer_token: Any) -> "str | None":
     return bearer_token if isinstance(bearer_token, str) and bearer_token else None
 
 
+@dataclasses.dataclass
+class WhipPublisherConfig:
+    """What a `WhipPublisher` is configured with."""
+
+    url: Annotated[str, "The WHIP endpoint to publish to."]
+    bearer_token: Annotated[
+        "str | None", "Sent as `Authorization: Bearer` when the endpoint wants one."
+    ] = None
+
+
 @processor(
     description=(
         "Publishes encoded video and audio to a WHIP endpoint, "
@@ -222,8 +233,8 @@ class WhipPublisher:
 
     The `Mp4Sink` shape: one fan-in input, and each inbound link is one track
     whose medium the link's first bag settles by its `codec`. Its settings are
-    ordinary constructor parameters — `url`, and an optional `bearer_token` —
-    which is what `rt.add(WhipPublisher, config={"url": ...})` passes.
+    a `WhipPublisherConfig` — `url`, and an optional `bearer_token` — which is
+    what `rt.add(WhipPublisher, config={"url": ...})` is constructed into.
 
     The session opens on the first bag rather than in `setup()`, because a
     relay round trip inside `setup()` spends the helper's start-up budget and a
@@ -238,9 +249,9 @@ class WhipPublisher:
     zero.
     """
 
-    def __init__(self, url: str, bearer_token: "str | None" = None) -> None:
-        self._url = _required_url(url, "WhipPublisher")
-        self._bearer_token = _optional_bearer_token(bearer_token)
+    def __init__(self, config: WhipPublisherConfig) -> None:
+        self._url = _required_url(config.url, "WhipPublisher")
+        self._bearer_token = _optional_bearer_token(config.bearer_token)
         self._session: "_native.WhipSession | None" = None
         self._inbound_links: "list[str]" = []
         self._kind_by_inbound_link: "dict[str, VideoOrAudio]" = {}
@@ -355,6 +366,16 @@ class WhipPublisher:
         return self._session
 
 
+@dataclasses.dataclass
+class WhepPlayerConfig:
+    """What a `WhepPlayer` is configured with."""
+
+    url: Annotated[str, "The WHEP endpoint to play from."]
+    bearer_token: Annotated[
+        "str | None", "Sent as `Authorization: Bearer` when the endpoint wants one."
+    ] = None
+
+
 @processor(
     execution="manual",
     description="Plays encoded video and audio back from a WHEP endpoint",
@@ -375,9 +396,9 @@ class WhepPlayer:
     decoder trims nothing.
     """
 
-    def __init__(self, url: str, bearer_token: "str | None" = None) -> None:
-        self._url = _required_url(url, "WhepPlayer")
-        self._bearer_token = _optional_bearer_token(bearer_token)
+    def __init__(self, config: WhepPlayerConfig) -> None:
+        self._url = _required_url(config.url, "WhepPlayer")
+        self._bearer_token = _optional_bearer_token(config.bearer_token)
         self._stop = threading.Event()
         self._reader: "threading.Thread | None" = None
         self._reported_an_oversized_bag = False

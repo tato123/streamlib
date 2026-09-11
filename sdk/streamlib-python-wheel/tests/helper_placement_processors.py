@@ -9,17 +9,23 @@ registers them — and by nothing else. What the placement gate watches for is a
 instance, which is the shape the ban forbids.
 """
 
+import dataclasses
 import os
 
 from streamlib import input, log, output, processor
+
+
+@dataclasses.dataclass
+class ReportsItsOwnProcessSourceConfig:
+    label: str = "unlabelled"
 
 
 @processor(execution="continuous", interval_ms=10)
 class ReportsItsOwnProcessSource:
     """Stamps every bag with the pid it was produced in."""
 
-    def __init__(self, label: str = "unlabelled") -> None:
-        self.label = label
+    def __init__(self, config: ReportsItsOwnProcessSourceConfig) -> None:
+        self.label = config.label
         self.announced = False
 
     @output()

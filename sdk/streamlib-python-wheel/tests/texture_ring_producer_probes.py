@@ -12,6 +12,7 @@ Both report over the same `MARKER:PROBE_RESULT` child-to-parent log forwarding
 the other probes use, tagged with `probe` because a scenario runs two of them.
 """
 
+import dataclasses
 import json
 import os
 import traceback
@@ -60,6 +61,11 @@ def pixel_value_of_frame(frame_index: int) -> int:
     return 10 + frame_index
 
 
+@dataclasses.dataclass
+class TextureRingPublishingVideoSourceConfig:
+    frames_to_publish: int = RING_DEPTH
+
+
 @processor(execution="continuous", interval_ms=10)
 class TextureRingPublishingVideoSource:
     """Publishes frames from its own output ring, one slot per frame."""
@@ -67,11 +73,11 @@ class TextureRingPublishingVideoSource:
     @output()
     def frames_to_downstream(self) -> None: ...
 
-    def __init__(self, frames_to_publish: int = RING_DEPTH) -> None:
+    def __init__(self, config: TextureRingPublishingVideoSourceConfig) -> None:
         self._output_texture_ring = ProcessorOutputTextureRing(
             RING_TEXTURE_FORMAT, RING_TEXTURE_USAGE, depth=RING_DEPTH
         )
-        self._frames_to_publish = frames_to_publish
+        self._frames_to_publish = config.frames_to_publish
         self._surface_ids_published_so_far: "list[str]" = []
 
     def process(self, ctx) -> None:

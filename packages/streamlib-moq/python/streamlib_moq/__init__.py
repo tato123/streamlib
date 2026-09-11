@@ -10,6 +10,13 @@ like any other Python processor.
 """
 
 from .processors import MoqBroadcastPublisher as MoqBroadcastPublisher
+from .processors import MoqBroadcastPublisherConfig as MoqBroadcastPublisherConfig
 from .processors import MoqBroadcastSubscriber as MoqBroadcastSubscriber
+from .processors import MoqBroadcastSubscriberConfig as MoqBroadcastSubscriberConfig
 
-__all__ = ["MoqBroadcastPublisher", "MoqBroadcastSubscriber"]
+__all__ = [
+    "MoqBroadcastPublisher",
+    "MoqBroadcastPublisherConfig",
+    "MoqBroadcastSubscriber",
+    "MoqBroadcastSubscriberConfig",
+]

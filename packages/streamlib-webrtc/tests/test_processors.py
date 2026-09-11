@@ -24,7 +24,7 @@ from streamlib import (
 )
 from streamlib._engine import ProcessorLinkDataAccess
 from streamlib._processor_hosting import construct_processor_instance
-from streamlib_webrtc import WhepPlayer, WhipPublisher
+from streamlib_webrtc import WhepPlayer, WhepPlayerConfig, WhipPublisher
 from streamlib_webrtc.processors import (
     FIRST_RECONNECT_DELAY_SECONDS,
     HELPER_LINK_PAYLOAD_CEILING_BYTES,
@@ -136,7 +136,7 @@ def test_an_oversized_bag_is_reported_once_rather_than_silently_dropped(
     per-frame condition reported per frame is noise, so it says it once."""
     reported: "list[str]" = []
     monkeypatch.setattr(log, "error", reported.append)
-    player = WhepPlayer(url="https://example.invalid/whep")
+    player = WhepPlayer(WhepPlayerConfig(url="https://example.invalid/whep"))
     over_the_ceiling = b"\x00" * (HELPER_LINK_PAYLOAD_CEILING_BYTES + 1)
 
     player._report_a_bag_the_link_will_drop("encoded_video", over_the_ceiling)
@@ -151,7 +151,11 @@ def test_a_bag_inside_the_ceiling_is_not_reported(monkeypatch):
     reported: "list[str]" = []
     monkeypatch.setattr(log, "error", reported.append)
 
-    WhepPlayer(url="https://example.invalid/whep")._report_a_bag_the_link_will_drop(
+    WhepPlayer(
+        WhepPlayerConfig(
+            url="https://example.invalid/whep"
+        )
+    )._report_a_bag_the_link_will_drop(
         "encoded_video", b"\x00" * 4096
     )
 
@@ -196,8 +200,8 @@ class _PublisherUnderTest:
         context = RuntimeContextFullAccess.open_for_helper_process(
             {}, link_data_access, "runtime-under-test", "processor-under-test"
         )
-        # Constructed the way the helper constructs it: config is the class's
-        # own keyword arguments, not something read off the context.
+        # Constructed the way the helper constructs it: the mapping becomes
+        # the class's config object, not something read off the context.
         construct_processor_instance(WhipPublisher, config, link_data_access).setup(
             context
         )
@@ -235,21 +239,21 @@ def test_a_publisher_whose_endpoint_is_not_an_address_is_refused_by_name(
         _PublisherUnderTest.set_up_with(request, 1, config)
 
 
-def test_a_publisher_added_with_no_endpoint_at_all_is_refused_by_the_engine(request):
-    """`url` has no default, so the engine's own construction refusal names it
-    before any of this wheel's validation runs."""
+def test_a_publisher_added_with_no_endpoint_at_all_is_refused_by_its_config_class(request):
+    """`url` has no default, so the config class refuses the empty mapping and
+    names the missing key before any of this wheel's own validation runs."""
     with pytest.raises(TypeError, match="missing 1 required positional argument"):
         _PublisherUnderTest.set_up_with(request, 1, {})
 
 
 @pytest.mark.parametrize("processor_class", [WhipPublisher, WhepPlayer])
-def test_config_reaches_a_processor_as_its_own_constructor_keywords(processor_class):
+def test_config_reaches_a_processor_as_its_own_config_object(processor_class):
     """The shape `rt.add(cls, config={...})` actually delivers.
 
-    `rt.add` records the config and the helper constructs the class from it, so
-    a class whose settings are not constructor parameters passes every
-    graph-building test and then fails in the child on the first run. This is
-    the engine's own mapping, called directly.
+    `rt.add` records the config and the helper constructs the class's config
+    class from it, so a class whose settings are not on that config class
+    passes every graph-building test and then fails in the child on the first
+    run. This is the engine's own mapping, called directly.
     """
     constructed = construct_processor_instance(
         processor_class,
@@ -370,7 +374,7 @@ def scripted_whep_session(monkeypatch):
 
 
 def _player_for_a_drain_that_returns_immediately() -> WhepPlayer:
-    player = WhepPlayer(url="https://example.invalid/whep")
+    player = WhepPlayer(WhepPlayerConfig(url="https://example.invalid/whep"))
     # The drain would otherwise spin on `next_media` returning None; stopping
     # the player makes each attempt reach the backoff at once.
     return player

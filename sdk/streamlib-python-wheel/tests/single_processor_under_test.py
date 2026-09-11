@@ -9,6 +9,8 @@ class declared inside a pytest module would have the child import the test
 suite.
 """
 
+import dataclasses
+
 import numpy
 
 from streamlib import AudioBlock, RuntimeContextLimitedAccess, input, output, processor
@@ -31,12 +33,17 @@ class DoublingFilter:
         ctx.outputs.write("numbers_to_downstream", {"value": bag["value"] * 2})
 
 
+@dataclasses.dataclass
+class ConfiguredScalerConfig:
+    factor: int = 1
+
+
 @processor
 class ConfiguredScaler:
     """Reads its factor from config, so the harness's `config=` is exercised."""
 
-    def __init__(self, factor: int = 1) -> None:
-        self.factor = factor
+    def __init__(self, config: ConfiguredScalerConfig) -> None:
+        self.factor = config.factor
 
     @input(delivery_profile="ordered")
     def numbers_from_upstream(self) -> None: ...

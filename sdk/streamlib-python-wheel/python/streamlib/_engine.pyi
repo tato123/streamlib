@@ -465,7 +465,15 @@ class Runtime:
         config: dict[str, Any] | None = None,
         display_name: str | None = None,
     ) -> AddedProcessor:
-        """Add a processor class to the graph, configured with `config`."""
+        """Add a processor class to the graph, configured with `config`.
+
+        `config` is the mapping the processor's config type is built from: for
+        a Python class, the class named by the annotation on its `__init__`'s
+        `config` parameter; for a native built-in, its Rust config struct.
+        Either way a processor that declares no config refuses a non-empty one,
+        and the keys it takes — with their types, defaults and descriptions —
+        are published as its config schema in the processor catalog.
+        """
 
     def connect(
         self, source: ProcessorOutputPortReference, destination: ProcessorInputPortReference
