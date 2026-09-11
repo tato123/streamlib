@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.20.0](https://github.com/tatolab/streamlib/compare/v0.19.2...v0.20.0) (2026-09-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **engine:** `ProcessorDescriptor::config_schema` and `with_config_schema` take a JSON Schema document rather than a name; the `#[processor(config_schema = "…")]` attribute key and the `ConfigDescriptor` derive are deleted; a processor declaring no config refuses a configuration instead of discarding it.
+
+### Features
+
+* **engine:** the descriptor carries the config type's derived JSON Schema ([#2224](https://github.com/tatolab/streamlib/issues/2224)) ([51fafdd](https://github.com/tatolab/streamlib/commit/51fafdd65307720a8d490daa36fad8674aea46e5))
+
 ## [0.19.2](https://github.com/tatolab/streamlib/compare/v0.19.1...v0.19.2) (2026-09-08)
 
 
