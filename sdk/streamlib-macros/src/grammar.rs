@@ -12,7 +12,7 @@
 //!     execution = manual,               // reactive | manual | continuous | continuous(interval_ms = 10)
 //!     scheduling = high,                // realtime | high | normal (default: normal)
 //!     unsafe_send,                      // flag — emit `unsafe impl Send`
-//!     config = crate::CameraConfig,     // Rust type path for the typed Config alias
+//!     config = crate::CameraConfig,     // typed Config alias; must derive `JsonSchema`
 //!     input("video_in", delivery_profile = "newest"),
 //!     output("video"),
 //! )]
