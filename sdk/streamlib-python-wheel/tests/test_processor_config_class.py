@@ -16,6 +16,10 @@ from typing import Annotated, Any, Literal, Optional, TypedDict
 import pydantic
 import pytest
 
+# The 3.10 floor spells per-key requiredness from here, and it is what the
+# wheel's own test environment installs; `typing.Required` arrives only at 3.11.
+from typing_extensions import NotRequired, Required
+
 from streamlib import processor
 from streamlib._processor_hosting import (
     apply_configuration,
@@ -485,7 +489,7 @@ def test_a_typing_extensions_typed_dict_is_recognised_as_one():
     """
     typing_extensions = pytest.importorskip("typing_extensions")
 
-    class ExtensionSpelledConfig(typing_extensions.TypedDict):
+    class ExtensionSpelledConfig(typing_extensions.TypedDict):  # pyright: ignore[reportGeneralTypeIssues]
         width: int
 
     document = schema_of(ExtensionSpelledConfig)
@@ -552,3 +556,156 @@ def test_the_live_mutation_fixture_written_as_a_source_string_still_declares():
         "type": "string",
         "default": "LIVE_FRAME",
     }
+
+
+# ---------------------------------------------------------------------------
+# Shapes the deriver has to describe rather than drop
+# ---------------------------------------------------------------------------
+
+
+def test_a_requiredness_qualifier_does_not_hide_the_type_it_wraps():
+    """`get_type_hints` keeps `Required` / `NotRequired`, and unrecognised they
+    swallow the key's type — the one thing the catalog exists to publish."""
+
+    class QualifiedConfig(TypedDict, total=False):
+        width: Required[Annotated[int, "How wide."]]
+        label: NotRequired[str]
+
+    document = schema_of(QualifiedConfig)
+
+    assert document["properties"]["width"] == {"type": "integer", "description": "How wide."}
+    assert document["properties"]["label"] == {"type": "string"}
+    assert document["required"] == ["width"]
+
+
+def test_an_init_var_is_documented_because_it_is_a_constructor_input():
+    """`dataclasses.fields()` omits an InitVar. Left out, it is absent from
+    `properties` while `additionalProperties: false` forbids it — a catalog
+    telling an agent that a required key is illegal."""
+
+    @dataclasses.dataclass
+    class SeededConfig:
+        width: int
+        seed: dataclasses.InitVar[int] = 3
+
+        def __post_init__(self, seed: int) -> None:
+            self.scaled_width = self.width * seed
+
+    assert SeededConfig(width=2, seed=5).scaled_width == 10, "an InitVar is an input"
+    document = schema_of(SeededConfig)
+
+    assert document["properties"]["seed"] == {"type": "integer", "default": 3}
+    assert "seed" not in document["required"]
+    assert document["additionalProperties"] is False
+
+
+def test_a_nested_models_pointers_are_followed_rather_than_left_dangling():
+    """A model writes `#/$defs/...` pointers as the root. Inlined under a
+    property they name a `$defs` the enclosing document does not have, so a
+    reader resolves them against nothing."""
+
+    class InnerModel(pydantic.BaseModel):
+        depth: int = 1
+
+    class OuterModel(pydantic.BaseModel):
+        inner: InnerModel = InnerModel()
+
+    @dataclasses.dataclass
+    class HoldingAModel:
+        model: OuterModel
+
+    document = schema_of(HoldingAModel)
+    nested = document["properties"]["model"]
+
+    assert "$ref" not in repr(nested), f"a pointer survived into a nested document: {nested}"
+    assert "$defs" not in nested
+    assert nested["properties"]["inner"]["properties"]["depth"]["type"] == "integer"
+
+
+def test_a_root_model_keeps_the_defs_it_wrote_for_itself():
+    """As the root its pointers resolve, so its document is taken verbatim."""
+
+    class InnerModel(pydantic.BaseModel):
+        depth: int = 1
+
+    class RootModel(pydantic.BaseModel):
+        inner: InnerModel = InnerModel()
+
+    document = schema_of(RootModel)
+
+    assert document["properties"]["inner"]["$ref"] == "#/$defs/InnerModel"
+    assert document["$defs"]["InnerModel"]["properties"]["depth"]["type"] == "integer"
+
+
+@pytest.mark.parametrize(
+    ("annotation", "default", "why"),
+    [
+        (float, float("inf"), "JSON has no infinity"),
+        (float, float("nan"), "JSON has no NaN"),
+        (int, 2**64, "msgpack carries no integer wider than 64 bits"),
+    ],
+)
+def test_a_default_the_wire_cannot_carry_is_dropped_not_rewritten(
+    annotation, default, why
+):
+    """The document crosses into Rust through the msgpack value tree, which
+    turns a non-finite float into a null and refuses a wider integer outright —
+    losing the whole declaration over one default the author can live without."""
+    OddlyDefaultedConfig = dataclasses.make_dataclass(
+        "OddlyDefaultedConfig",
+        [("setting", annotation, dataclasses.field(default=default))],
+    )
+
+    document = schema_of(OddlyDefaultedConfig)
+
+    assert "default" not in document["properties"]["setting"], why
+    assert "setting" not in document.get("required", []), "it still has a default"
+
+
+# ---------------------------------------------------------------------------
+# The rest of the construction contract
+# ---------------------------------------------------------------------------
+
+
+def test_the_helper_constructs_the_processor_by_the_config_keyword():
+    """Positionally would work for every class in this suite and break the
+    moment an author writes a keyword-only `config`."""
+    constructed_with: "dict[str, Any]" = {}
+
+    @processor(execution="manual")
+    class KeywordOnlyConfigured:
+        def __init__(self, *, config: BlurConfigDataclass) -> None:
+            constructed_with["config"] = config
+
+    construct_processor_instance(KeywordOnlyConfigured, {"width": 2}, None)
+
+    assert constructed_with["config"] == BlurConfigDataclass(width=2)
+
+
+def test_a_variadic_positional_config_is_refused_by_name():
+    with pytest.raises(TypeError, match=r"\*config"):
+
+        @processor(execution="manual")
+        class Blur:
+            def __init__(self, *config: Any) -> None:
+                self.config = config
+
+
+def test_reconfiguring_a_processor_that_declares_no_config_refuses_the_keys():
+    @processor(execution="manual")
+    class UnconfiguredButReconfigurable:
+        def __init__(self) -> None:
+            self.configured_with: Any = "never"
+
+        def configure(self, config: None) -> None:
+            self.configured_with = config
+
+    built = construct_processor_instance(UnconfiguredButReconfigurable, {}, None)
+
+    with pytest.raises(TypeError, match="`width` has nowhere to go"):
+        apply_configuration(built, {"width": 1})
+
+    # An empty update is not a mistake, so it reaches the hook with the nothing
+    # the class declared.
+    apply_configuration(built, {})
+    assert built.configured_with is None

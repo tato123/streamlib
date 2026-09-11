@@ -43,7 +43,7 @@ classifiers = [
 # lane installs from the published index, which is rebuilt only after the
 # extension wheels are built. So a floor naming the engine version released in
 # the same run would fail the release smoke test.
-dependencies = ["streamlib>=0.18.49"]
+dependencies = ["streamlib>=0.20.0"]
 
 # What pip records at install and the engine reads back through
 # `importlib.metadata` when a process takes an engine role.

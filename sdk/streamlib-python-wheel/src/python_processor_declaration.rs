@@ -429,6 +429,7 @@ fn read_dict_string(dictionary: &Bound<'_, PyDict>, key: &str) -> PyResult<Strin
 mod tests {
     use super::*;
     use crate::python_class_from_source_for_tests::class_from_source;
+    use streamlib::sdk::descriptors::ProcessorConfigJsonSchema;
 
     /// A class carrying what `@streamlib.processor` attaches.
     const DECLARED_CLASS_SOURCE: &str = "\
@@ -620,6 +621,16 @@ class AudioConsumer:
     /// A processor declaring no config publishes what `EmptyConfig` publishes
     /// in Rust, so one catalog reads one way whichever language declared the
     /// processor.
+    ///
+    /// Compared against the Rust document itself rather than a literal: a
+    /// literal proves the Python half against this test's own opinion, and the
+    /// invariant being claimed is that the two emitters agree.
+    ///
+    /// One key is deliberately excluded. `schemars` stamps every root document
+    /// with a `title` from the config type's name, so a Rust document carries
+    /// `"title": "EmptyConfig"` and no Python document carries a title at all.
+    /// The keyword is an annotation with no validation effect, and converting
+    /// either side to match would be churn on a difference no reader acts on.
     #[test]
     fn a_class_declaring_no_config_carries_the_same_document_rust_publishes() {
         let declaration = read_python_declaration(
@@ -632,13 +643,17 @@ class AudioConsumer:
         )
         .expect("the declaration reads");
 
+        let mut what_rust_publishes =
+            <streamlib::sdk::processors::EmptyConfig as ProcessorConfigJsonSchema>::
+                processor_config_schema_document();
+        what_rust_publishes
+            .as_object_mut()
+            .expect("the document is an object")
+            .remove("title");
+
         assert_eq!(
             declaration.descriptor.config_schema,
-            Some(serde_json::json!({
-                "type": "object",
-                "description": "This processor declares no configuration.",
-                "additionalProperties": false,
-            }))
+            Some(what_rust_publishes)
         );
     }
 

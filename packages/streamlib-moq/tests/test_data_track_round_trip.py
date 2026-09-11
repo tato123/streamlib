@@ -51,6 +51,7 @@ from streamlib_moq import (
     _native,
 )
 from streamlib_moq.processors import DATA_BAGS_OUTPUT_PORT, TRACKS_INPUT_PORT
+
 A_RELAY = "https://relay.invalid/a-token"
 A_BROADCAST = "streamlib/a-broadcast"
 THE_DATA_TRACK_NAME = "telemetry"

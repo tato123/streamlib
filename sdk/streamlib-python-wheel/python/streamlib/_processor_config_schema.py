@@ -7,7 +7,11 @@ The document is JSON Schema draft 2020-12 with no `$schema` key — the dialect
 `sdk/streamlib-processor-schema/src/config_schema_document.rs` emits for a Rust
 config type, so a node serves one dialect whichever language declared the
 processor. Nested classes are inlined and `Optional[T]` is an `anyOf` with null,
-so nothing here emits a `$ref` and no document needs a `$defs`.
+so nothing here emits a `$ref`. One document can still carry `$defs`: a model
+handed in as the config class contributes its own schema, and a pydantic model
+writes its nested types that way. A model nested under a *property* is flattened
+instead, because its pointers are root-relative and resolve against nothing once
+the document is no longer the root.
 
 The dialect is shared; two spellings inside it are not, and both are valid
 2020-12. The Rust side writes a nullable as `"type": [T, "null"]` and stamps a
@@ -28,6 +32,8 @@ from __future__ import annotations
 import collections.abc
 import dataclasses
 import enum
+import inspect
+import math
 import types
 import typing
 from typing import Any
@@ -60,8 +66,18 @@ _MAPPING_ORIGINS = (
     collections.abc.MutableMapping,
 )
 
+# `get_type_hints` keeps a TypedDict key's requiredness qualifier, which says
+# nothing about the value's type and hides it from the mapper. Recognised by
+# the special form's own name rather than by identity, because the 3.10 floor
+# has these from `typing_extensions` and 3.11+ from `typing`, and a config
+# class may be written against either.
+_REQUIREDNESS_QUALIFIER_NAMES = ("Required", "NotRequired")
 
-def is_a_typed_dict(candidate: Any) -> bool:
+# Where a model's own document points at its own definitions.
+_DEFINITION_POINTER_PREFIX = "#/$defs/"
+
+
+def _is_a_typed_dict(candidate: Any) -> bool:
     """Whether `candidate` is a TypedDict under either spelling.
 
     `typing.is_typeddict` recognises `typing.TypedDict` alone, and a
@@ -110,7 +126,7 @@ def _document_for_class(
         return _document_the_model_carries(config_class, model_json_schema)
 
     ancestry = classes_being_inlined + (config_class,)
-    if is_a_typed_dict(config_class):
+    if _is_a_typed_dict(config_class):
         return _typed_dict_document(config_class, ancestry)
     if dataclasses.is_dataclass(config_class):
         return _dataclass_document(config_class, ancestry)
@@ -118,6 +134,54 @@ def _document_for_class(
     # about its keys, which is all that can honestly be derived from a class of
     # a kind the deriver does not recognise.
     return {"type": "object"}
+
+
+def _resolved_against_its_own_definitions(document: Any) -> Any:
+    """`document` with each `#/$defs/` pointer replaced by what it points at.
+
+    A model nested under a property carries pointers written when it was the
+    root, so they name a `$defs` the enclosing document does not have. Nothing
+    else here emits a `$ref`, so this only ever has a model's document to walk.
+    """
+    if not isinstance(document, dict) or "$defs" not in document:
+        return document
+    definitions = document["$defs"]
+    resolved = {key: value for key, value in document.items() if key != "$defs"}
+    return _with_pointers_followed(resolved, definitions, ())
+
+
+def _with_pointers_followed(
+    node: Any, definitions: "dict[str, Any]", pointers_being_followed: "tuple[str, ...]"
+) -> Any:
+    if isinstance(node, list):
+        return [
+            _with_pointers_followed(entry, definitions, pointers_being_followed)
+            for entry in node
+        ]
+    if not isinstance(node, dict):
+        return node
+
+    pointer = node.get("$ref")
+    if isinstance(pointer, str) and pointer.startswith(_DEFINITION_POINTER_PREFIX):
+        name = pointer[len(_DEFINITION_POINTER_PREFIX) :]
+        if name in pointers_being_followed or name not in definitions:
+            # A definition that reaches itself, or one the document never
+            # carried: an open object beats a pointer to nothing.
+            return {"type": "object"}
+        followed = _with_pointers_followed(
+            definitions[name], definitions, pointers_being_followed + (name,)
+        )
+        beside_the_pointer = {
+            key: _with_pointers_followed(value, definitions, pointers_being_followed)
+            for key, value in node.items()
+            if key != "$ref"
+        }
+        return {**followed, **beside_the_pointer}
+
+    return {
+        key: _with_pointers_followed(value, definitions, pointers_being_followed)
+        for key, value in node.items()
+    }
 
 
 def _document_the_model_carries(
@@ -161,25 +225,48 @@ def _dataclass_document(
     config_class: type, ancestry: "tuple[type, ...]"
 ) -> "dict[str, Any]":
     annotations = _resolved_class_annotations(config_class)
+    fields_by_name = {field.name: field for field in dataclasses.fields(config_class)}
+    # An `InitVar` is a constructor input that `dataclasses.fields()` omits. Left
+    # out it would be absent from `properties` while `additionalProperties: false`
+    # forbade it — a catalog telling an agent that a required key is illegal.
+    init_parameters = inspect.signature(config_class).parameters
+
     properties: "dict[str, Any]" = {}
     required: "list[str]" = []
-    for field in dataclasses.fields(config_class):
-        # An `init=False` field is not a constructor input, so a configuration
-        # cannot carry it and it is not documented.
-        if not field.init:
+    for name, annotation in annotations.items():
+        field = fields_by_name.get(name)
+        if field is not None:
+            # An `init=False` field is not a constructor input, so a
+            # configuration cannot carry it and it is not documented.
+            if not field.init:
+                continue
+            declared_default = (
+                field.default if field.default is not dataclasses.MISSING else _ABSENT
+            )
+            has_default_factory = field.default_factory is not dataclasses.MISSING
+            annotation = annotations.get(name, field.type)
+        elif isinstance(annotation, dataclasses.InitVar):
+            parameter = init_parameters.get(name)
+            declared_default = (
+                _ABSENT
+                if parameter is None or parameter.default is inspect.Parameter.empty
+                else parameter.default
+            )
+            has_default_factory = False
+            annotation = annotation.type
+        else:
+            # A `ClassVar` or a bare annotation the dataclass machinery ignored:
+            # not a constructor input either way.
             continue
-        field_schema = _json_schema_for_annotation(
-            annotations.get(field.name, field.type), ancestry
-        )
-        has_default = field.default is not dataclasses.MISSING
-        has_default_factory = field.default_factory is not dataclasses.MISSING
-        if has_default:
-            rendered_default = _json_representable(field.default)
+
+        field_schema = _json_schema_for_annotation(annotation, ancestry)
+        if declared_default is not _ABSENT:
+            rendered_default = _json_representable(declared_default)
             if rendered_default is not _NOT_JSON_REPRESENTABLE:
                 field_schema["default"] = rendered_default
-        if not has_default and not has_default_factory:
-            required.append(field.name)
-        properties[field.name] = field_schema
+        elif not has_default_factory:
+            required.append(name)
+        properties[name] = field_schema
 
     document: "dict[str, Any]" = {
         "type": "object",
@@ -213,6 +300,10 @@ def _json_schema_for_annotation(
     rather than refusing the class: a config class is worth publishing long
     before every type in it is describable.
     """
+    origin_name = getattr(typing.get_origin(annotation), "_name", None)
+    if origin_name in _REQUIREDNESS_QUALIFIER_NAMES:
+        return _json_schema_for_annotation(typing.get_args(annotation)[0], ancestry)
+
     metadata = getattr(annotation, "__metadata__", None)
     if metadata is not None:
         described = _json_schema_for_annotation(typing.get_args(annotation)[0], ancestry)
@@ -256,13 +347,17 @@ def _json_schema_for_annotation(
         if issubclass(annotation, enum.Enum):
             return _enumerated_schema(tuple(member.value for member in annotation))
         if (
-            is_a_typed_dict(annotation)
+            _is_a_typed_dict(annotation)
             or dataclasses.is_dataclass(annotation)
             or callable(getattr(annotation, "model_json_schema", None))
         ):
-            # Inlined rather than referenced: nothing here emits a `$ref`, so
-            # no document carries a `$defs` for one to point into.
-            return _document_for_class(annotation, ancestry)
+            # A model's own document points at its own `$defs` with a
+            # root-relative pointer, which resolves against nothing once the
+            # document sits under a property. Every other kind is already
+            # self-contained, so this is a no-op for them.
+            return _resolved_against_its_own_definitions(
+                _document_for_class(annotation, ancestry)
+            )
 
     return {}
 
@@ -311,6 +406,14 @@ class _NotJsonRepresentableSentinel:
 # Distinct from `None`, which is itself a representable default.
 _NOT_JSON_REPRESENTABLE = _NotJsonRepresentableSentinel()
 
+# Distinct from `None` for the same reason: a field may default to it.
+_ABSENT = object()
+
+# The document crosses into the descriptor through the msgpack value tree the
+# data plane uses, which carries no integer wider than 64 bits and would refuse
+# the whole declaration rather than the one default.
+_WIDEST_REPRESENTABLE_INTEGERS = range(-(2**63), 2**64)
+
 
 def _json_representable(value: Any) -> Any:
     """`value` as JSON, or [`_NOT_JSON_REPRESENTABLE`] if it is not expressible.
@@ -320,8 +423,14 @@ def _json_representable(value: Any) -> Any:
     """
     if isinstance(value, enum.Enum):
         return _json_representable(value.value)
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or isinstance(value, (bool, str)):
         return value
+    if isinstance(value, int):
+        return value if value in _WIDEST_REPRESENTABLE_INTEGERS else _NOT_JSON_REPRESENTABLE
+    if isinstance(value, float):
+        # JSON has no infinity and no NaN, so a default that is one cannot
+        # cross into the descriptor and is dropped rather than rewritten.
+        return value if math.isfinite(value) else _NOT_JSON_REPRESENTABLE
     if isinstance(value, (list, tuple)):
         rendered = [_json_representable(entry) for entry in value]
         if any(entry is _NOT_JSON_REPRESENTABLE for entry in rendered):

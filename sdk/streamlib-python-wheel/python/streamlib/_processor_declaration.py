@@ -439,7 +439,7 @@ def _config_class_named_by_the_init_annotation(
     if not parameters:
         return None
 
-    fix = (
+    how_to_declare_a_config_class = (
         f"declare one parameter named `config`, annotated with the class its settings "
         f"live on — `def __init__(self, config: {processor_class.__name__}Config) -> "
         f"None` — where that class is a TypedDict, a dataclass or a model. "
@@ -451,7 +451,7 @@ def _config_class_named_by_the_init_annotation(
         raise TypeError(
             f"{processor_class.__name__}.__init__ takes {len(parameters)} parameters "
             f"besides `self` ({', '.join(parameter.name for parameter in parameters)}); "
-            f"a processor's config is one class, not a parameter list. To fix: {fix}"
+            f"a processor's config is one class, not a parameter list. To fix: {how_to_declare_a_config_class}"
         )
 
     parameter = parameters[0]
@@ -459,17 +459,17 @@ def _config_class_named_by_the_init_annotation(
         raise TypeError(
             f"{processor_class.__name__}.__init__ takes `**{parameter.name}`; "
             f"keyword-argument configuration is not how a processor is configured. "
-            f"To fix: {fix}"
+            f"To fix: {how_to_declare_a_config_class}"
         )
     if parameter.kind is inspect.Parameter.VAR_POSITIONAL:
         raise TypeError(
             f"{processor_class.__name__}.__init__ takes `*{parameter.name}`; a "
-            f"processor's config is one object, not a variadic. To fix: {fix}"
+            f"processor's config is one object, not a variadic. To fix: {how_to_declare_a_config_class}"
         )
     if parameter.name != "config":
         raise TypeError(
             f"{processor_class.__name__}.__init__ takes `{parameter.name}`, but a "
-            f"processor's config parameter must be named `config`. To fix: {fix}"
+            f"processor's config parameter must be named `config`. To fix: {how_to_declare_a_config_class}"
         )
     if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
         raise TypeError(
@@ -483,13 +483,13 @@ def _config_class_named_by_the_init_annotation(
         raise TypeError(
             f"{processor_class.__name__}.__init__ takes `config` with no annotation, so "
             f"nothing names its config class and no schema can be derived. "
-            f"To fix: {fix}"
+            f"To fix: {how_to_declare_a_config_class}"
         )
     if annotation is Any:
         raise TypeError(
             f"{processor_class.__name__}.__init__ annotates `config` as `Any`, which "
             f"names no class, so the helper has nothing to construct and no schema can "
-            f"be derived. To fix: {fix}"
+            f"be derived. To fix: {how_to_declare_a_config_class}"
         )
     # The origin check, not the class check, is what refuses `dict[str, Any]` on
     # Python 3.10, where `isinstance(dict[str, Any], type)` is still True.
@@ -497,7 +497,7 @@ def _config_class_named_by_the_init_annotation(
         raise TypeError(
             f"{processor_class.__name__}.__init__ annotates `config` as {annotation!r}, "
             f"which is not a class. A processor's config is one class the helper "
-            f"constructs. To fix: {fix}"
+            f"constructs. To fix: {how_to_declare_a_config_class}"
         )
     return annotation
 
