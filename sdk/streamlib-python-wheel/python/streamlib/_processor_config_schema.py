@@ -230,10 +230,22 @@ def _dataclass_document(
     # out it would be absent from `properties` while `additionalProperties: false`
     # forbade it — a catalog telling an agent that a required key is illegal.
     init_parameters = inspect.signature(config_class).parameters
+    # And the constructor has the final say on what a configuration may carry,
+    # because that is what `config_class(**configuration)` calls. A generated
+    # `__init__` takes exactly the `init=True` fields, so this narrows nothing
+    # for an ordinary dataclass; `init=False` or a hand-written constructor is
+    # where the field list and the callable disagree, and documenting a key the
+    # class refuses is the same lie as omitting one it requires.
+    accepts_any_key = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in init_parameters.values()
+    )
 
     properties: "dict[str, Any]" = {}
     required: "list[str]" = []
     for name, annotation in annotations.items():
+        if not accepts_any_key and name not in init_parameters:
+            continue
         field = fields_by_name.get(name)
         if field is not None:
             # An `init=False` field is not a constructor input, so a
@@ -382,10 +394,17 @@ def _sequence_schema(
                 element_annotations[0], ancestry
             )
         elif element_annotations:
-            document["prefixItems"] = [
+            positional_item_schemas = [
                 _json_schema_for_annotation(element, ancestry)
                 for element in element_annotations
             ]
+            document["prefixItems"] = positional_item_schemas
+            # `prefixItems` says what each position holds and nothing about how
+            # many there are, so a fixed-length tuple that stated only that
+            # would validate a shorter or longer array. The Rust seam bounds
+            # its tuples the same way.
+            document["minItems"] = len(positional_item_schemas)
+            document["maxItems"] = len(positional_item_schemas)
         return document
     if len(element_annotations) == 1:
         document["items"] = _json_schema_for_annotation(

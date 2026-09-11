@@ -24,12 +24,7 @@ from streamlib import (
 )
 from streamlib._engine import ProcessorLinkDataAccess
 from streamlib._processor_hosting import construct_processor_instance
-from streamlib_webrtc import (
-    WhepPlayer,
-    WhepPlayerConfig,
-    WhipPublisher,
-    WhipPublisherConfig,
-)
+from streamlib_webrtc import WhepPlayer, WhepPlayerConfig, WhipPublisher
 from streamlib_webrtc.processors import (
     FIRST_RECONNECT_DELAY_SECONDS,
     HELPER_LINK_PAYLOAD_CEILING_BYTES,

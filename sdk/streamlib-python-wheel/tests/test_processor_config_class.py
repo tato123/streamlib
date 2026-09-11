@@ -736,3 +736,59 @@ def test_a_config_class_of_a_kind_the_deriver_cannot_read_is_accepted_and_open()
     assert PlainlyConfigured.__streamlib_processor_config_schema__ == {"type": "object"}
     built = construct_processor_instance(PlainlyConfigured, {"width": 9}, None)
     assert built.config.width == 9, "it constructs; only the description is missing"
+
+
+def test_a_dataclass_whose_constructor_takes_less_than_its_fields_documents_the_constructor():
+    """`config_class(**configuration)` is what a configuration meets, so the
+    constructor has the final say. Documenting a key it refuses is the same lie
+    as omitting one it requires."""
+
+    @dataclasses.dataclass(init=False)
+    class NarrowerThanItsFieldsConfig:
+        width: int = 1
+        label: str = "x"
+
+        def __init__(self, width: int = 1) -> None:
+            self.width = width
+            self.label = "derived"
+
+    document = schema_of(NarrowerThanItsFieldsConfig)
+
+    assert set(document["properties"]) == {"width"}
+    with pytest.raises(TypeError, match="label"):
+        NarrowerThanItsFieldsConfig(width=2, label="refused")  # pyright: ignore[reportCallIssue]
+
+
+def test_a_dataclass_with_no_generated_constructor_documents_no_keys_at_all():
+    @dataclasses.dataclass(init=False)
+    class TakesNothingConfig:
+        width: int = 1
+
+    assert schema_of(TakesNothingConfig) == {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
+
+
+def test_a_fixed_length_tuple_states_its_length_not_only_its_positions():
+    """2020-12 reads `prefixItems` as what each position holds and nothing about
+    how many there are, so on its own it validates a shorter or longer array.
+    The Rust seam bounds its tuples the same way."""
+
+    @dataclasses.dataclass
+    class CroppedConfig:
+        crop: "tuple[int, int, int, int]" = (0, 0, 0, 0)
+        tail: "tuple[int, ...]" = ()
+
+    document = schema_of(CroppedConfig)
+
+    assert document["properties"]["crop"]["minItems"] == 4
+    assert document["properties"]["crop"]["maxItems"] == 4
+    assert len(document["properties"]["crop"]["prefixItems"]) == 4
+    # A homogeneous tuple has no length to state.
+    assert document["properties"]["tail"] == {
+        "type": "array",
+        "items": {"type": "integer"},
+        "default": [],
+    }
