@@ -517,6 +517,13 @@ class BlurProcessor:
     /// `__init__.py` — which imports the compiled `_engine` a `cargo test` run
     /// does not have — is not executed. Only the siblings actually imported are
     /// loaded, and each is the same file `include_str!` above reads.
+    ///
+    /// `_engine` is the one sibling that cannot be: it is the compiled artifact
+    /// this binary *is* a copy of, and a `maturin develop` leaves one in the
+    /// source directory that the search path would otherwise load — a second
+    /// engine, with its own process-global registry, deciding whether these
+    /// tests pass. A stand-in stands in for it, so a decoration here reads the
+    /// grammar and registers nothing.
     fn install_stand_in_streamlib_package(python: Python<'_>) {
         let sys_modules = python
             .import("sys")
@@ -541,6 +548,17 @@ class BlurProcessor:
             )
             .unwrap();
         sys_modules.set_item("streamlib", package).unwrap();
+
+        let stand_in_engine = PyModule::from_code(
+            python,
+            c"def register_declared_processor_class(processor_class): pass",
+            c"streamlib/_engine.py",
+            c"streamlib._engine",
+        )
+        .unwrap();
+        sys_modules
+            .set_item("streamlib._engine", stand_in_engine)
+            .unwrap();
     }
 
     /// Run the real decorator module, run `class_body_source` against it, and
