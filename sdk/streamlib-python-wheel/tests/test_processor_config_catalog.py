@@ -1,0 +1,127 @@
+# Copyright (c) 2025 Jonathan Fontanez
+# SPDX-License-Identifier: BUSL-1.1
+
+"""What a running node tells an agent about a processor's config, end to end.
+
+The declaration suite proves the document is derived; this proves the derived
+document survives the trip into the Rust descriptor and out of `/api/registry`,
+on a real node with each processor in its own helper process. Nothing here needs
+a GPU, which is the point: every other live proof of a configured Python
+processor is rig-only.
+"""
+
+import json
+import re
+from pathlib import Path
+from typing import Any, Iterator
+
+import pytest
+
+from app_under_test import start_app
+
+APP = Path(__file__).parent / "processor_config_catalog_app.py"
+
+CATALOG = re.compile(r"MARKER:CATALOG (\{.*\})\s*$", re.MULTILINE)
+CONSTRUCTED = re.compile(r"MARKER:CONSTRUCTED (\{.*?\})")
+
+
+@pytest.fixture(scope="module")
+def catalog_app_output() -> "Iterator[str]":
+    """One node, one run: four helper spawns are the cost, so they are paid once.
+
+    Module-scoped, so it reaps its own process group rather than reaching for
+    the function-scoped fixture every other app suite uses. Leaving that to a
+    failed assertion would strand a live engine holding a socket and an
+    iceoryx2 node.
+    """
+    app = start_app(APP)
+    try:
+        app.await_output_containing("MARKER:CATALOG", "the served catalog")
+        app.await_marker("CLEAN_EXIT")
+        app.await_clean_exit()
+        yield app.output
+    finally:
+        app.kill_process_group()
+
+
+@pytest.fixture(scope="module")
+def served_catalog(catalog_app_output: str) -> "dict[str, Any]":
+    match = CATALOG.search(catalog_app_output)
+    assert match is not None, f"no catalog line:\n{catalog_app_output}"
+    return json.loads(match.group(1))
+
+
+def schema_for(served_catalog: "dict[str, Any]", probe: str) -> "dict[str, Any]":
+    document = served_catalog[f"processor_config_catalog_probes:{probe}"]
+    assert document is not None, f"{probe} served a null config schema"
+    return document
+
+
+def test_a_dataclass_config_reaches_the_registry_with_types_defaults_and_descriptions(
+    served_catalog,
+):
+    document = schema_for(served_catalog, "DataclassConfiguredProbe")
+
+    assert document["properties"]["width"] == {
+        "type": "integer",
+        "description": "How wide the probe pretends its frames are.",
+        "default": 640,
+    }
+    assert document["properties"]["label"]["default"] == "unlabelled"
+    assert document["additionalProperties"] is False
+
+
+def test_a_typed_dict_config_reaches_the_registry(served_catalog):
+    document = schema_for(served_catalog, "TypedDictConfiguredProbe")
+
+    assert document["properties"]["width"]["type"] == "integer"
+    assert document["properties"]["width"]["description"]
+    # `total=False`, so nothing is required and the class admits an unknown key.
+    assert "required" not in document
+    assert "additionalProperties" not in document
+
+
+def test_a_model_config_reaches_the_registry_as_the_model_describes_itself(
+    served_catalog,
+):
+    document = schema_for(served_catalog, "ModelConfiguredProbe")
+
+    assert document["properties"]["width"] == {
+        "default": 1280,
+        "title": "Width",
+        "type": "integer",
+    }
+    assert "$schema" not in document
+    assert "title" not in document, "the catalog entry names the processor already"
+
+
+def test_a_processor_declaring_no_config_serves_an_empty_object_not_a_null(
+    served_catalog,
+):
+    """A null would read as "this node does not know", which is a different
+    claim from "this processor takes nothing"."""
+    assert schema_for(served_catalog, "UnconfiguredProbe") == {
+        "type": "object",
+        "description": "This processor declares no configuration.",
+        "additionalProperties": False,
+    }
+
+
+def test_every_helper_constructed_the_config_class_its_processor_named(
+    catalog_app_output,
+):
+    """The half a served document cannot show: the object really arrived in the
+    child, built from the mapping `rt.add` recorded."""
+    constructed = {
+        report["processor"]: report["config_type"]
+        for report in (
+            json.loads(match.group(1)) for match in CONSTRUCTED.finditer(catalog_app_output)
+        )
+    }
+
+    assert constructed == {
+        "TypedDictConfiguredProbe": "dict",
+        "DataclassConfiguredProbe": "DataclassProbeConfig",
+        "ModelConfiguredProbe": "ModelProbeConfig",
+        "UnconfiguredProbe": "NoneType",
+    }
