@@ -21,8 +21,7 @@ from streamlib import processor
 from streamlib._engine import (
     processor_class_import_paths_in_this_processes_catalog,
 )
-
-HELPER_PROCESS_ENTRYPOINT_ENV = "STREAMLIB_ENTRYPOINT"
+from streamlib._helper import ENTRYPOINT_ENV
 
 # What a real helper imports and hosts — its own module, as every processor
 # class must be.
@@ -219,7 +218,7 @@ def test_an_interpreter_carrying_the_helper_entrypoint_registers_nothing():
     else — which is what makes its presence a reliable "I am a helper".
     """
     catalog = _catalog_of_an_interpreter_carrying(
-        {HELPER_PROCESS_ENTRYPOINT_ENV: PROCESSOR_A_HELPER_HOSTS}
+        {ENTRYPOINT_ENV: PROCESSOR_A_HELPER_HOSTS}
     )
 
     assert PROCESSOR_A_HELPER_HOSTS not in catalog, (

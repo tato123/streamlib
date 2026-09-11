@@ -4,9 +4,11 @@
 """The `@processor` grammar — execution mode and ports, declared in code.
 
 Nothing is read from disk: there is no manifest, and a bare `.py` module defines
-a working processor. `@processor` attaches the metadata the engine reads at
-`Runtime.add` time as `__streamlib_processor_*__` class attributes; that set is
-the contract between this module and the native half, and the two move together.
+a working processor. `@processor` attaches the metadata as
+`__streamlib_processor_*__` class attributes and hands the class to the native
+half, which reads exactly that set and registers the descriptor there and then;
+the set is the contract between this module and the native half, and the two
+move together.
 Ports are declared with the `@input` / `@output` method decorators and accessed
 at run time through `ctx.inputs` / `ctx.outputs` — the marker methods themselves
 are never called.

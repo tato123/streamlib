@@ -24,11 +24,11 @@ use crate::python_helper_process_spawn_host::{
 use crate::python_processor_declaration::PythonProcessorDeclaration;
 use crate::python_processor_import_path::processor_class_import_path;
 
-/// Which Python class each registered import path was registered from.
+/// Which Python class each import path had its constructor installed from.
 ///
-/// A cache of *which class*, never the authority on *whether* a type is
-/// registered — that stays the engine's registry, consulted below, so this can
-/// never suppress a re-registration the engine actually needs.
+/// A cache of *which class*, never the authority on *whether* a type can be
+/// constructed — that stays the engine's registry, consulted below, so this can
+/// never report an install the engine does not actually hold.
 fn registered_processor_classes() -> &'static Mutex<HashMap<ProcessorClassImportPath, Py<PyAny>>> {
     static REGISTERED_PROCESSOR_CLASSES: OnceLock<
         Mutex<HashMap<ProcessorClassImportPath, Py<PyAny>>>,

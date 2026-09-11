@@ -396,9 +396,11 @@ impl ProcessorInstanceFactory {
 
     /// Register a processor descriptor without a constructor.
     ///
-    /// Used for subprocess processors (Python, TypeScript) where no Rust-side
-    /// `ProcessorInstance` is created. The graph needs the descriptor and port info
-    /// for validation and wiring, but `create()` will return an error if called.
+    /// What a Python class's `@processor` decorator calls, so the class is in
+    /// the catalog before anything adds it. The graph has the descriptor and
+    /// port info it needs to validate and wire, and `create()` refuses until
+    /// [`Self::install_constructor_for_registered_descriptor`] supplies the
+    /// constructor — which a first add does.
     pub fn register_descriptor_only(&self, descriptor: ProcessorDescriptor) -> Result<()> {
         let processor_class_import_path = descriptor.processor_class_import_path.clone();
 
@@ -418,11 +420,8 @@ impl ProcessorInstanceFactory {
         descriptors.insert(processor_class_import_path.clone(), descriptor);
         drop(descriptors);
 
-        // No constructor registered - create() will fail with ProcessorNotFound,
-        // which is correct since subprocess processors are never instantiated in Rust.
-
         tracing::info!(
-            "[register_descriptor_only] subprocess processor type registered '{}'",
+            "[register_descriptor_only] processor type registered without a constructor '{}'",
             processor_class_import_path
         );
 
